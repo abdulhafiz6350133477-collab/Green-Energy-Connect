@@ -31,7 +31,7 @@ function MessageBubble({ message, isMe }: { message: Message; isMe: boolean }) {
 export default function RoomScreen() {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { rooms, user, sendMessage, getMessagesForRoom, activeMembers } = useApp();
+  const { rooms, user, sendMessage, getMessagesForRoom, members } = useApp();
   const [inputText, setInputText] = useState('');
   const flatListRef = useRef<FlatList>(null);
   const webTopInset = Platform.OS === 'web' ? 67 : 0;
@@ -91,7 +91,7 @@ export default function RoomScreen() {
           <Text style={styles.headerTitle} numberOfLines={1}>{room.name}</Text>
           <View style={styles.headerMeta}>
             <View style={styles.headerDot} />
-            <Text style={styles.headerSubtitle}>{activeMembers} online</Text>
+            <Text style={styles.headerSubtitle}>{members.length} member{members.length !== 1 ? 's' : ''}</Text>
           </View>
         </View>
         <View style={styles.headerRight} />

@@ -1,24 +1,46 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Pressable, Platform, ScrollView, TextInput, Alert } from 'react-native';
-import { Ionicons, Feather } from '@expo/vector-icons';
+import { View, Text, StyleSheet, Pressable, Platform, ScrollView, TextInput, Alert, FlatList } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useApp } from '@/contexts/AppContext';
+import { useApp, Member } from '@/contexts/AppContext';
 import Colors from '@/constants/colors';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Linking } from 'react-native';
 
 const INTEREST_OPTIONS = [
   'Tech', 'Music', 'Design', 'Gaming', 'Art', 'Writing',
   'Fitness', 'Coding', 'Photography', 'Business', 'Science', 'Film',
 ];
 
+function MemberRow({ member, onRemove }: { member: Member; onRemove: () => void }) {
+  return (
+    <View style={styles.memberRow}>
+      <View style={styles.memberAvatar}>
+        <Text style={styles.memberAvatarText}>{member.avatar}</Text>
+      </View>
+      <View style={styles.memberInfo}>
+        <Text style={styles.memberName}>{member.name}</Text>
+        {member.phone && <Text style={styles.memberPhone}>{member.phone}</Text>}
+      </View>
+      <Pressable
+        onPress={onRemove}
+        style={({ pressed }) => [styles.removeMemberBtn, pressed && { opacity: 0.6 }]}
+      >
+        <Ionicons name="close-circle" size={20} color={Colors.dark.textMuted} />
+      </Pressable>
+    </View>
+  );
+}
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
-  const { user, updateProfile, activeMembers, setHasSeenWelcome } = useApp();
+  const { user, updateProfile, members, setHasSeenWelcome, addMembersFromContacts, removeMember } = useApp();
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(user.name);
   const [editStatus, setEditStatus] = useState(user.status);
   const [editInterests, setEditInterests] = useState<string[]>(user.interests);
+  const [isLoadingContacts, setIsLoadingContacts] = useState(false);
   const webTopInset = Platform.OS === 'web' ? 67 : 0;
 
   const handleSave = () => {
@@ -38,6 +60,60 @@ export default function ProfileScreen() {
       prev.includes(interest)
         ? prev.filter(i => i !== interest)
         : [...prev, interest]
+    );
+  };
+
+  const handleAddFromContacts = async () => {
+    if (Platform.OS === 'web') {
+      Alert.alert('Not Available', 'Contact access is only available on mobile devices. Open the app on your phone to add members from your contacts.');
+      return;
+    }
+
+    setIsLoadingContacts(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    const result = await addMembersFromContacts();
+    setIsLoadingContacts(false);
+
+    if (result.denied) {
+      Alert.alert(
+        'Contacts Access Needed',
+        'To add members from your contacts, please allow access in your device settings.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          ...(Platform.OS !== 'web' ? [{
+            text: 'Open Settings',
+            onPress: () => {
+              try { Linking.openSettings(); } catch {}
+            },
+          }] : []),
+        ]
+      );
+      return;
+    }
+
+    if (result.added === 0) {
+      Alert.alert('All Caught Up', 'No new contacts to add. Everyone in your contact list is already a member.');
+    } else {
+      Alert.alert('Members Added', `${result.added} contact${result.added !== 1 ? 's' : ''} added to the gang!`);
+    }
+  };
+
+  const handleRemoveMember = (member: Member) => {
+    Alert.alert(
+      'Remove Member',
+      `Remove ${member.name} from the gang?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            removeMember(member.id);
+          },
+        },
+      ]
     );
   };
 
@@ -147,8 +223,8 @@ export default function ProfileScreen() {
             <View style={styles.statDivider} />
             <View style={styles.statItem}>
               <Ionicons name="people" size={20} color={Colors.dark.green} />
-              <Text style={styles.statValue}>{activeMembers}</Text>
-              <Text style={styles.statLabel}>online</Text>
+              <Text style={styles.statValue}>{members.length}</Text>
+              <Text style={styles.statLabel}>members</Text>
             </View>
           </View>
         </View>
@@ -175,6 +251,44 @@ export default function ProfileScreen() {
               );
             })}
           </View>
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Members</Text>
+            <Pressable
+              onPress={handleAddFromContacts}
+              disabled={isLoadingContacts}
+              style={({ pressed }) => [styles.addContactsBtn, pressed && { opacity: 0.7 }, isLoadingContacts && { opacity: 0.5 }]}
+            >
+              <Ionicons name="person-add" size={16} color={Colors.dark.background} />
+              <Text style={styles.addContactsBtnText}>
+                {isLoadingContacts ? 'Loading...' : 'Add from Contacts'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {members.length > 0 ? (
+            <View style={styles.membersContainer}>
+              {members.map(member => (
+                <MemberRow
+                  key={member.id}
+                  member={member}
+                  onRemove={() => handleRemoveMember(member)}
+                />
+              ))}
+            </View>
+          ) : (
+            <View style={styles.emptyMembers}>
+              <Ionicons name="people-outline" size={36} color={Colors.dark.textMuted} />
+              <Text style={styles.emptyMembersText}>No members yet</Text>
+              <Text style={styles.emptyMembersSubtext}>
+                {Platform.OS === 'web'
+                  ? 'Open on your phone to add contacts'
+                  : 'Tap "Add from Contacts" to bring in your people'}
+              </Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.section}>
@@ -343,11 +457,102 @@ const styles = StyleSheet.create({
   section: {
     marginBottom: 24,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
   sectionTitle: {
     fontFamily: 'SpaceGrotesk_600SemiBold',
     fontSize: 18,
     color: Colors.dark.text,
     marginBottom: 14,
+  },
+  addContactsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: Colors.dark.green,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+    marginBottom: 14,
+  },
+  addContactsBtnText: {
+    fontFamily: 'SpaceGrotesk_600SemiBold',
+    fontSize: 13,
+    color: Colors.dark.background,
+  },
+  membersContainer: {
+    backgroundColor: Colors.dark.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+    overflow: 'hidden',
+  },
+  memberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.dark.border,
+  },
+  memberAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: Colors.dark.greenGlowSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Colors.dark.greenGlow,
+  },
+  memberAvatarText: {
+    fontFamily: 'SpaceGrotesk_600SemiBold',
+    fontSize: 16,
+    color: Colors.dark.green,
+  },
+  memberInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  memberName: {
+    fontFamily: 'SpaceGrotesk_500Medium',
+    fontSize: 15,
+    color: Colors.dark.text,
+  },
+  memberPhone: {
+    fontFamily: 'SpaceGrotesk_400Regular',
+    fontSize: 12,
+    color: Colors.dark.textMuted,
+  },
+  removeMemberBtn: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyMembers: {
+    backgroundColor: Colors.dark.surface,
+    borderRadius: 16,
+    padding: 32,
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+  },
+  emptyMembersText: {
+    fontFamily: 'SpaceGrotesk_600SemiBold',
+    fontSize: 16,
+    color: Colors.dark.textSecondary,
+  },
+  emptyMembersSubtext: {
+    fontFamily: 'SpaceGrotesk_400Regular',
+    fontSize: 13,
+    color: Colors.dark.textMuted,
+    textAlign: 'center',
   },
   interestsGrid: {
     flexDirection: 'row',

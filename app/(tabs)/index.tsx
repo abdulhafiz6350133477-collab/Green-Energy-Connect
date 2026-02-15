@@ -38,7 +38,7 @@ function PulseIndicator({ intensity }: { intensity: number }) {
   );
 }
 
-function RoomCard({ room, onPress, index }: { room: any; onPress: () => void; index: number }) {
+function RoomCard({ room, onPress }: { room: any; onPress: () => void }) {
   const getIcon = () => {
     if (room.iconFamily === 'MaterialIcons') {
       return <MaterialIcons name={room.icon as any} size={24} color={Colors.dark.green} />;
@@ -68,13 +68,22 @@ function RoomCard({ room, onPress, index }: { room: any; onPress: () => void; in
 
 export default function RoomsScreen() {
   const insets = useSafeAreaInsets();
-  const { rooms, activeMembers, pulseIntensity, getMessagesForRoom } = useApp();
+  const { rooms, members, pulseIntensity } = useApp();
   const webTopInset = Platform.OS === 'web' ? 67 : 0;
 
   const handleRoomPress = (roomId: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     router.push({ pathname: '/room/[id]', params: { id: roomId } });
   };
+
+  const memberCount = members.length;
+  const pulseLabel = memberCount === 0
+    ? 'No members yet'
+    : pulseIntensity > 0.7
+      ? 'High Energy'
+      : pulseIntensity > 0.4
+        ? 'Vibing'
+        : 'Warming Up';
 
   return (
     <View style={styles.container}>
@@ -93,11 +102,13 @@ export default function RoomsScreen() {
         <View style={styles.header}>
           <View style={styles.headerTop}>
             <Text style={styles.headerTitle}>Rooms</Text>
-            <View style={styles.pulseContainer}>
-              <PulseIndicator intensity={pulseIntensity} />
-              <View style={styles.activeDot} />
-              <Text style={styles.activeText}>{activeMembers} active</Text>
-            </View>
+            {memberCount > 0 && (
+              <View style={styles.pulseContainer}>
+                <PulseIndicator intensity={pulseIntensity} />
+                <View style={styles.activeDot} />
+                <Text style={styles.activeText}>{memberCount} member{memberCount !== 1 ? 's' : ''}</Text>
+              </View>
+            )}
           </View>
           <Text style={styles.headerSubtitle}>Jump in and connect with the gang</Text>
         </View>
@@ -107,29 +118,18 @@ export default function RoomsScreen() {
           <View style={styles.greenPulseContent}>
             <Ionicons name="pulse" size={16} color={Colors.dark.green} />
             <Text style={styles.greenPulseText}>Green Pulse</Text>
-            <Text style={styles.greenPulseLevel}>
-              {pulseIntensity > 0.7 ? 'High Energy' : pulseIntensity > 0.4 ? 'Vibing' : 'Warming Up'}
-            </Text>
+            <Text style={styles.greenPulseLevel}>{pulseLabel}</Text>
           </View>
         </View>
 
         <View style={styles.roomsList}>
-          {rooms.map((room, index) => {
-            const roomMessages = getMessagesForRoom(room.id);
-            const lastMsg = roomMessages[roomMessages.length - 1];
-            return (
-              <RoomCard
-                key={room.id}
-                room={{
-                  ...room,
-                  lastMessage: lastMsg?.text,
-                  lastMessageTime: lastMsg?.timestamp,
-                }}
-                onPress={() => handleRoomPress(room.id)}
-                index={index}
-              />
-            );
-          })}
+          {rooms.map((room) => (
+            <RoomCard
+              key={room.id}
+              room={room}
+              onPress={() => handleRoomPress(room.id)}
+            />
+          ))}
         </View>
       </ScrollView>
     </View>
