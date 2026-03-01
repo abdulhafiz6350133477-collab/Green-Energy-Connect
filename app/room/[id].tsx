@@ -18,6 +18,15 @@ interface Message {
   timestamp: number;
 }
 
+const API_BASE = getApiUrl();
+
+async function apiFetch(path: string): Promise<Response> {
+  return fetch(`${API_BASE}${path}`, {
+    headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+    cache: 'no-store' as RequestCache,
+  });
+}
+
 function MessageBubble({ message, isMe }: { message: Message; isMe: boolean }) {
   const time = new Date(message.timestamp);
   const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -48,8 +57,11 @@ export default function RoomScreen() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const flatListRef = useRef<FlatList>(null);
+  // Track the timestamp of the LAST message we've confirmed from the server
+  // Start at 0 so the first poll fetches everything
   const lastTimestampRef = useRef<number>(0);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isMounted = useRef(true);
   const webTopInset = Platform.OS === 'web' ? 67 : 0;
 
   const room = rooms.find(r => r.id === id);
@@ -59,79 +71,78 @@ export default function RoomScreen() {
     transform: [{ scale: sendScale.value }],
   }));
 
-  const fetchMessages = useCallback(async (since = 0) => {
-    if (!id) return;
+  // Merge new messages into state, deduplicating by id
+  const mergeMessages = useCallback((incoming: Message[]) => {
+    if (!isMounted.current || incoming.length === 0) return;
+    setMessages(prev => {
+      const existingIds = new Set(prev.map(m => m.id));
+      const toAdd = incoming.filter(m => !existingIds.has(m.id));
+      if (toAdd.length === 0) return prev;
+      const merged = [...prev, ...toAdd].sort((a, b) => a.timestamp - b.timestamp);
+      // Update lastTimestamp to the highest timestamp we know about
+      lastTimestampRef.current = Math.max(
+        lastTimestampRef.current,
+        merged[merged.length - 1].timestamp
+      );
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 80);
+      return merged;
+    });
+  }, []);
+
+  // Poll for messages since lastTimestamp (or all messages if 0)
+  const pollMessages = useCallback(async () => {
+    if (!id || !isMounted.current) return;
     try {
-      const url = new URL(`/api/messages/${id}`, getApiUrl());
-      if (since > 0) url.searchParams.set('since', String(since));
-      const res = await fetch(url.toString());
-      if (!res.ok) throw new Error('Failed to fetch');
+      // We fetch since (lastTimestamp - 1) to ensure we never miss a message
+      // due to timestamp boundary edge cases
+      const since = lastTimestampRef.current > 0 ? lastTimestampRef.current - 1 : 0;
+      const res = await apiFetch(`api/messages/${encodeURIComponent(id)}?since=${since}&t=${Date.now()}`);
+      if (!res.ok || !isMounted.current) return;
       const data = await res.json();
-      const newMessages: Message[] = data.messages || [];
-      if (newMessages.length > 0) {
-        setMessages(prev => {
-          const existing = new Set(prev.map(m => m.id));
-          const toAdd = newMessages.filter(m => !existing.has(m.id));
-          if (toAdd.length === 0) return prev;
-          const updated = [...prev, ...toAdd].sort((a, b) => a.timestamp - b.timestamp);
-          lastTimestampRef.current = updated[updated.length - 1].timestamp;
-          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-          return updated;
-        });
-      }
+      const incoming: Message[] = (data.messages || []).map((m: any) => ({
+        ...m,
+        timestamp: typeof m.timestamp === 'number' ? m.timestamp : parseInt(m.timestamp, 10),
+      }));
+      mergeMessages(incoming);
     } catch (err) {
-      console.error('Fetch messages error:', err);
+      // Silent fail — next poll will retry
     }
-  }, [id]);
+  }, [id, mergeMessages]);
 
   useEffect(() => {
+    isMounted.current = true;
+    lastTimestampRef.current = 0;
+
+    // Initial load
     const init = async () => {
       setLoadingMessages(true);
-      await fetchMessages(0);
-      setLoadingMessages(false);
+      await pollMessages();
+      if (isMounted.current) setLoadingMessages(false);
     };
     init();
 
-    pollIntervalRef.current = setInterval(() => {
-      fetchMessages(lastTimestampRef.current);
-    }, 3000);
+    // Poll every 2 seconds for new messages from other devices
+    pollIntervalRef.current = setInterval(pollMessages, 2000);
 
     return () => {
+      isMounted.current = false;
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
-  }, [fetchMessages]);
+  }, [id]);  // Only re-run when room id changes
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
     if (!text || !id || isSending) return;
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    sendScale.value = withSpring(0.8, {}, () => { sendScale.value = withSpring(1); });
+    sendScale.value = withSpring(0.85, {}, () => { sendScale.value = withSpring(1); });
 
     setSendError(null);
     setIsSending(true);
     setInputText('');
 
-    const optimisticId = `optimistic_${Date.now()}`;
-    const optimistic: Message = {
-      id: optimisticId,
-      roomId: id,
-      userId: user.id,
-      userName: user.name,
-      text,
-      timestamp: Date.now(),
-    };
-
-    setMessages(prev => {
-      const updated = [...prev, optimistic];
-      lastTimestampRef.current = optimistic.timestamp;
-      return updated;
-    });
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-
     try {
-      const url = new URL('/api/messages', getApiUrl());
-      const res = await fetch(url.toString(), {
+      const res = await fetch(`${API_BASE}api/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roomId: id, userId: user.id, userName: user.name, text }),
@@ -139,25 +150,29 @@ export default function RoomScreen() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Send failed');
+        throw new Error((errData as any).error || 'Send failed');
       }
 
       const data = await res.json();
-      const serverMsg: Message = data.message;
+      const serverMsg: Message = {
+        ...data.message,
+        timestamp: typeof data.message.timestamp === 'number'
+          ? data.message.timestamp
+          : parseInt(data.message.timestamp, 10),
+      };
 
-      setMessages(prev =>
-        prev.map(m => m.id === optimisticId ? serverMsg : m)
-      );
-      lastTimestampRef.current = serverMsg.timestamp;
+      // Add the confirmed server message immediately
+      mergeMessages([serverMsg]);
+      // Scroll after message appears
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 80);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to send message';
       setSendError(msg);
-      setMessages(prev => prev.filter(m => m.id !== optimisticId));
       setInputText(text);
     } finally {
       setIsSending(false);
     }
-  }, [inputText, id, isSending, user]);
+  }, [inputText, id, isSending, user, mergeMessages]);
 
   const renderMessage = useCallback(({ item }: { item: Message }) => (
     <MessageBubble message={item} isMe={item.userId === user.id} />
@@ -198,7 +213,9 @@ export default function RoomScreen() {
           <Text style={styles.headerTitle} numberOfLines={1}>{room.name}</Text>
           <View style={styles.headerMeta}>
             <View style={styles.headerDot} />
-            <Text style={styles.headerSubtitle}>{members.length} member{members.length !== 1 ? 's' : ''}</Text>
+            <Text style={styles.headerSubtitle}>
+              {members.length} member{members.length !== 1 ? 's' : ''}
+            </Text>
           </View>
         </View>
         <View style={styles.headerRight} />

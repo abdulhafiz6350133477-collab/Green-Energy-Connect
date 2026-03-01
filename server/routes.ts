@@ -17,22 +17,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/messages/:roomId", async (req: Request, res: Response) => {
     try {
       const { roomId } = req.params;
-      const since = req.query.since ? parseInt(req.query.since as string) : 0;
+      const since = req.query.since ? parseInt(req.query.since as string, 10) : 0;
 
       if (!roomId || typeof roomId !== "string") {
         return res.status(400).json({ error: "Invalid room ID" });
       }
 
+      // Disable caching so every device always gets fresh messages
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+
       const result = await query(
-        `SELECT id, room_id as "roomId", user_id as "userId", user_name as "userName", text, timestamp
+        `SELECT id,
+                room_id   AS "roomId",
+                user_id   AS "userId",
+                user_name AS "userName",
+                text,
+                CAST(timestamp AS TEXT) AS timestamp
          FROM messages
-         WHERE room_id = $1 AND timestamp > $2
+         WHERE room_id = $1 AND timestamp >= $2
          ORDER BY timestamp ASC
-         LIMIT 200`,
+         LIMIT 300`,
         [roomId, since]
       );
 
-      return res.json({ messages: result.rows });
+      // Ensure timestamp is always a number, never a string
+      const messages = result.rows.map((row: any) => ({
+        ...row,
+        timestamp: parseInt(row.timestamp, 10),
+      }));
+
+      return res.json({ messages });
     } catch (err) {
       console.error("GET /api/messages error:", err);
       return res.status(500).json({ error: "Failed to fetch messages" });
@@ -61,11 +76,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const result = await query(
         `INSERT INTO messages (room_id, user_id, user_name, text, timestamp)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, room_id as "roomId", user_id as "userId", user_name as "userName", text, timestamp`,
+         RETURNING id,
+                   room_id   AS "roomId",
+                   user_id   AS "userId",
+                   user_name AS "userName",
+                   text,
+                   CAST(timestamp AS TEXT) AS timestamp`,
         [roomId, userId, userName, sanitizedText, timestamp]
       );
 
-      return res.status(201).json({ message: result.rows[0] });
+      const row = result.rows[0];
+      const message = { ...row, timestamp: parseInt(row.timestamp, 10) };
+
+      return res.status(201).json({ message });
     } catch (err) {
       console.error("POST /api/messages error:", err);
       return res.status(500).json({ error: "Failed to send message" });
