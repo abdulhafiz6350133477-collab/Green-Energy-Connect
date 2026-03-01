@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Pressable, Platform, ScrollView, TextInput, Alert, FlatList } from 'react-native';
+import { View, Text, StyleSheet, Pressable, Platform, ScrollView, TextInput, Alert, Linking } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp, Member } from '@/contexts/AppContext';
 import Colors from '@/constants/colors';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Linking } from 'react-native';
+import { ContactPicker } from '@/components/ContactPicker';
 
 const INTEREST_OPTIONS = [
   'Tech', 'Music', 'Design', 'Gaming', 'Art', 'Writing',
@@ -35,13 +35,14 @@ function MemberRow({ member, onRemove }: { member: Member; onRemove: () => void 
 
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
-  const { user, updateProfile, members, setHasSeenWelcome, addMembersFromContacts, removeMember } = useApp();
+  const { user, updateProfile, members, setHasSeenWelcome, addSelectedMembers, removeMember } = useApp();
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(user.name);
   const [editStatus, setEditStatus] = useState(user.status);
   const [editInterests, setEditInterests] = useState<string[]>(user.interests);
-  const [isLoadingContacts, setIsLoadingContacts] = useState(false);
+  const [showContactPicker, setShowContactPicker] = useState(false);
   const webTopInset = Platform.OS === 'web' ? 67 : 0;
+  const existingMemberIds = new Set(members.map(m => m.id));
 
   const handleSave = () => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -63,39 +64,20 @@ export default function ProfileScreen() {
     );
   };
 
-  const handleAddFromContacts = async () => {
+  const handleAddFromContacts = () => {
     if (Platform.OS === 'web') {
       Alert.alert('Not Available', 'Contact access is only available on mobile devices. Open the app on your phone to add members from your contacts.');
       return;
     }
-
-    setIsLoadingContacts(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setShowContactPicker(true);
+  };
 
-    const result = await addMembersFromContacts();
-    setIsLoadingContacts(false);
-
-    if (result.denied) {
-      Alert.alert(
-        'Contacts Access Needed',
-        'To add members from your contacts, please allow access in your device settings.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          ...(Platform.OS !== 'web' ? [{
-            text: 'Open Settings',
-            onPress: () => {
-              try { Linking.openSettings(); } catch {}
-            },
-          }] : []),
-        ]
-      );
-      return;
-    }
-
-    if (result.added === 0) {
-      Alert.alert('All Caught Up', 'No new contacts to add. Everyone in your contact list is already a member.');
-    } else {
-      Alert.alert('Members Added', `${result.added} contact${result.added !== 1 ? 's' : ''} added to the gang!`);
+  const handleContactsConfirm = (selected: { id: string; name: string; phone?: string; avatar: string }[]) => {
+    setShowContactPicker(false);
+    const added = addSelectedMembers(selected);
+    if (added > 0) {
+      Alert.alert('Members Added', `${added} member${added !== 1 ? 's' : ''} added to the gang!`);
     }
   };
 
@@ -139,6 +121,12 @@ export default function ProfileScreen() {
 
   return (
     <View style={styles.container}>
+      <ContactPicker
+        visible={showContactPicker}
+        existingIds={existingMemberIds}
+        onClose={() => setShowContactPicker(false)}
+        onConfirm={handleContactsConfirm}
+      />
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={[
@@ -258,13 +246,10 @@ export default function ProfileScreen() {
             <Text style={styles.sectionTitle}>Members</Text>
             <Pressable
               onPress={handleAddFromContacts}
-              disabled={isLoadingContacts}
-              style={({ pressed }) => [styles.addContactsBtn, pressed && { opacity: 0.7 }, isLoadingContacts && { opacity: 0.5 }]}
+              style={({ pressed }) => [styles.addContactsBtn, pressed && { opacity: 0.7 }]}
             >
               <Ionicons name="person-add" size={16} color={Colors.dark.background} />
-              <Text style={styles.addContactsBtnText}>
-                {isLoadingContacts ? 'Loading...' : 'Add from Contacts'}
-              </Text>
+              <Text style={styles.addContactsBtnText}>Add from Contacts</Text>
             </Pressable>
           </View>
 

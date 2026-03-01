@@ -100,6 +100,7 @@ interface AppContextValue {
   updateProfile: (updates: Partial<UserProfile>) => void;
   getMessagesForRoom: (roomId: string) => Message[];
   addMembersFromContacts: () => Promise<{ added: number; denied: boolean }>;
+  addSelectedMembers: (selected: { id: string; name: string; phone?: string; avatar: string }[]) => number;
   removeMember: (memberId: string) => void;
 }
 
@@ -263,18 +264,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
 
       const existingIds = new Set(members.map(m => m.id));
-      let addedCount = 0;
-
       const newMembers: Member[] = [];
       for (const contact of data) {
         const contactName = contact.name;
         if (!contactName) continue;
-
         const contactId = `contact_${contact.id}`;
         if (existingIds.has(contactId)) continue;
-
         const phone = contact.phoneNumbers?.[0]?.number;
-
         newMembers.push({
           id: contactId,
           name: contactName,
@@ -282,7 +278,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
           avatar: contactName[0]?.toUpperCase() || '?',
           addedAt: Date.now(),
         });
-        addedCount++;
       }
 
       if (newMembers.length > 0) {
@@ -293,11 +288,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
       }
 
-      return { added: addedCount, denied: false };
+      return { added: newMembers.length, denied: false };
     } catch (error) {
       console.error('Failed to access contacts:', error);
       return { added: 0, denied: false };
     }
+  }, [members]);
+
+  const addSelectedMembers = useCallback((selected: { id: string; name: string; phone?: string; avatar: string }[]): number => {
+    const existingIds = new Set(members.map(m => m.id));
+    const newMembers: Member[] = selected
+      .filter(s => !existingIds.has(s.id))
+      .map(s => ({
+        id: s.id,
+        name: s.name,
+        phone: s.phone,
+        avatar: s.avatar,
+        addedAt: Date.now(),
+      }));
+
+    if (newMembers.length > 0) {
+      setMembers(prev => {
+        const updated = [...prev, ...newMembers];
+        saveMembers(updated);
+        return updated;
+      });
+    }
+    return newMembers.length;
   }, [members]);
 
   const removeMember = useCallback((memberId: string) => {
@@ -311,10 +328,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({
     user, rooms, messages, projects, events, members, activeMembers, pulseIntensity,
     hasSeenWelcome, setHasSeenWelcome, sendMessage, addProject, joinProject,
-    joinEvent, updateProfile, getMessagesForRoom, addMembersFromContacts, removeMember,
+    joinEvent, updateProfile, getMessagesForRoom, addMembersFromContacts, addSelectedMembers, removeMember,
   }), [user, rooms, messages, projects, events, members, activeMembers, pulseIntensity,
     hasSeenWelcome, sendMessage, addProject, joinProject, joinEvent, updateProfile,
-    getMessagesForRoom, addMembersFromContacts, removeMember]);
+    getMessagesForRoom, addMembersFromContacts, addSelectedMembers, removeMember]);
 
   if (!isLoaded) return null;
 
