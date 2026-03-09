@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import { Pool } from "pg";
-import { initSocketIO, broadcastMessage } from "./socket";
+import { initSocketIO, broadcastMessage, broadcastDelete } from "./socket";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -100,6 +100,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Delete a single message (only the sender can delete their own message)
+  app.delete("/api/messages/message/:messageId", async (req: Request, res: Response) => {
+    try {
+      const { messageId } = req.params;
+      const { userId } = req.body;
+
+      if (!messageId || !userId) {
+        return res.status(400).json({ error: "Missing messageId or userId" });
+      }
+
+      // Fetch the message first to verify ownership and get roomId for broadcast
+      const existing = await query(
+        `SELECT id, room_id AS "roomId", user_id AS "userId" FROM messages WHERE id = $1`,
+        [messageId]
+      );
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: "Message not found" });
+      }
+
+      const msg = existing.rows[0];
+      if (msg.userId !== userId) {
+        return res.status(403).json({ error: "You can only delete your own messages" });
+      }
+
+      await query("DELETE FROM messages WHERE id = $1", [messageId]);
+
+      // Broadcast deletion to all clients in this room
+      broadcastDelete(msg.roomId, messageId);
+
+      return res.json({ success: true });
+    } catch (err) {
+      console.error("DELETE /api/messages/message error:", err);
+      return res.status(500).json({ error: "Failed to delete message" });
+    }
+  });
+
+  // Clear all messages in a room (admin use)
   app.delete("/api/messages/:roomId", async (req: Request, res: Response) => {
     try {
       const { roomId } = req.params;

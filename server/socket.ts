@@ -53,3 +53,8 @@ export function broadcastMessage(
   if (!io) return;
   io.to(roomId).emit("new_message", message);
 }
+
+export function broadcastDelete(roomId: string, messageId: string) {
+  if (!io) return;
+  io.to(roomId).emit("delete_message", { messageId });
+}
