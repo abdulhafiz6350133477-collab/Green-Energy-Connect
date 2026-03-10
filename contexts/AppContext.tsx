@@ -1,8 +1,12 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, ReactNode, useCallback, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
 import * as Contacts from 'expo-contacts';
 import { Platform } from 'react-native';
+import { getApiUrl } from '@/lib/query-client';
+import { getSocket } from '@/lib/socket';
+
+const API_BASE = getApiUrl();
 
 export interface Message {
   id: string;
@@ -57,6 +61,7 @@ export interface UserProfile {
   streak: number;
   joinDate: string;
   avatar: string;
+  avatarUri?: string;
 }
 
 export interface Member {
@@ -100,7 +105,7 @@ interface AppContextValue {
   updateProfile: (updates: Partial<UserProfile>) => void;
   getMessagesForRoom: (roomId: string) => Message[];
   addMembersFromContacts: () => Promise<{ added: number; denied: boolean }>;
-  addSelectedMembers: (selected: { id: string; name: string; phone?: string; avatar: string }[]) => number;
+  addSelectedMembers: (selected: { id: string; name: string; phone?: string; avatar: string }[]) => Promise<number>;
   removeMember: (memberId: string) => void;
 }
 
@@ -108,13 +113,14 @@ const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserProfile>({
-    id: 'me',
+    id: 'device_init',
     name: 'You',
     status: 'Vibing with the gang',
     interests: ['Tech', 'Music', 'Design'],
     streak: 1,
     joinDate: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
     avatar: 'Y',
+    avatarUri: undefined,
   });
   const [rooms, setRooms] = useState<Room[]>(DEFAULT_ROOMS);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -123,53 +129,118 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [hasSeenWelcome, setHasSeenWelcomeState] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+  const isMounted = useRef(true);
 
-  const activeMembers = useMemo(() => {
-    return members.length;
-  }, [members]);
-
+  const activeMembers = useMemo(() => members.length, [members]);
   const pulseIntensity = useMemo(() => {
     if (members.length === 0) return 0;
     return Math.min(1, members.length / 15);
   }, [members]);
 
   useEffect(() => {
+    isMounted.current = true;
     loadData();
+    return () => { isMounted.current = false; };
+  }, []);
+
+  const fetchMembers = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}api/members`, {
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      if (!res.ok || !isMounted.current) return;
+      const data = await res.json();
+      if (isMounted.current) setMembers(data.members || []);
+    } catch { /* silent */ }
+  }, []);
+
+  const fetchProjects = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}api/projects`, {
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      if (!res.ok || !isMounted.current) return;
+      const data = await res.json();
+      if (isMounted.current) setProjects(data.projects || []);
+    } catch { /* silent */ }
   }, []);
 
   const loadData = async () => {
     try {
-      const [savedMessages, savedProjects, savedEvents, savedProfile, savedWelcome, savedMembers] = await Promise.all([
-        AsyncStorage.getItem('gg_messages'),
-        AsyncStorage.getItem('gg_projects'),
+      const [savedEvents, savedProfile, savedWelcome, savedDeviceId] = await Promise.all([
         AsyncStorage.getItem('gg_events'),
         AsyncStorage.getItem('gg_profile'),
         AsyncStorage.getItem('gg_welcome_seen'),
-        AsyncStorage.getItem('gg_members'),
+        AsyncStorage.getItem('gg_device_id'),
       ]);
-      if (savedMessages) setMessages(JSON.parse(savedMessages));
-      if (savedProjects) setProjects(JSON.parse(savedProjects));
+
+      // Generate or restore unique device ID
+      let deviceId = savedDeviceId;
+      if (!deviceId) {
+        deviceId = 'device_' + Crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+        await AsyncStorage.setItem('gg_device_id', deviceId);
+      }
+
+      if (savedProfile) {
+        const profile = JSON.parse(savedProfile);
+        // Always use the stable device ID
+        setUser({ ...profile, id: deviceId });
+      } else {
+        setUser(prev => ({ ...prev, id: deviceId! }));
+      }
+
       if (savedEvents) setEvents(JSON.parse(savedEvents));
-      if (savedProfile) setUser(JSON.parse(savedProfile));
       if (savedWelcome === 'true') setHasSeenWelcomeState(true);
-      if (savedMembers) setMembers(JSON.parse(savedMembers));
     } catch (e) {
       console.error('Failed to load data:', e);
     }
-    setIsLoaded(true);
+
+    // Fetch server-synced data
+    await Promise.all([fetchMembers(), fetchProjects()]);
+
+    if (isMounted.current) setIsLoaded(true);
   };
 
-  const saveMessages = async (msgs: Message[]) => {
-    try { await AsyncStorage.setItem('gg_messages', JSON.stringify(msgs)); } catch {}
-  };
-  const saveProjects = async (projs: Project[]) => {
-    try { await AsyncStorage.setItem('gg_projects', JSON.stringify(projs)); } catch {}
-  };
+  // Socket listeners for global broadcasts
+  useEffect(() => {
+    const socket = getSocket();
+
+    const onMembersUpdated = (data: { action: string; members?: Member[]; memberId?: string }) => {
+      if (!isMounted.current) return;
+      if (data.action === 'added' && data.members) {
+        setMembers(prev => {
+          const existingIds = new Set(prev.map(m => m.id));
+          const newOnes = (data.members || []).filter(m => !existingIds.has(m.id));
+          return newOnes.length > 0 ? [...prev, ...newOnes] : prev;
+        });
+      } else if (data.action === 'removed' && data.memberId) {
+        setMembers(prev => prev.filter(m => m.id !== data.memberId));
+      }
+    };
+
+    const onProjectsUpdated = (data: { action: string; project?: Project }) => {
+      if (!isMounted.current) return;
+      if (data.action === 'created' && data.project) {
+        setProjects(prev => {
+          if (prev.find(p => p.id === data.project!.id)) return prev;
+          return [data.project!, ...prev];
+        });
+      } else if (data.action === 'updated' && data.project) {
+        setProjects(prev => prev.map(p => p.id === data.project!.id ? data.project! : p));
+      }
+    };
+
+    socket.on('members_updated', onMembersUpdated);
+    socket.on('projects_updated', onProjectsUpdated);
+
+    return () => {
+      socket.off('members_updated', onMembersUpdated);
+      socket.off('projects_updated', onProjectsUpdated);
+    };
+  }, []);
+
   const saveEvents = async (evts: GangEvent[]) => {
     try { await AsyncStorage.setItem('gg_events', JSON.stringify(evts)); } catch {}
-  };
-  const saveMembers = async (mems: Member[]) => {
-    try { await AsyncStorage.setItem('gg_members', JSON.stringify(mems)); } catch {}
   };
 
   const setHasSeenWelcome = async (v: boolean) => {
@@ -178,47 +249,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
   };
 
   const sendMessage = useCallback((roomId: string, text: string) => {
-    const newMsg: Message = {
-      id: Crypto.randomUUID(),
-      roomId,
-      userId: user.id,
-      userName: user.name,
-      text,
-      timestamp: Date.now(),
-    };
-    setMessages(prev => {
-      const updated = [...prev, newMsg];
-      saveMessages(updated);
-      return updated;
-    });
     setRooms(prev => prev.map(r =>
       r.id === roomId ? { ...r, lastMessage: text, lastMessageTime: Date.now(), messageCount: r.messageCount + 1 } : r
     ));
-  }, [user]);
-
-  const addProject = useCallback((project: Omit<Project, 'id' | 'timestamp'>) => {
-    const newProj: Project = {
-      ...project,
-      id: Crypto.randomUUID(),
-      timestamp: Date.now(),
-    };
-    setProjects(prev => {
-      const updated = [newProj, ...prev];
-      saveProjects(updated);
-      return updated;
-    });
   }, []);
 
-  const joinProject = useCallback((projectId: string) => {
-    setProjects(prev => {
-      const updated = prev.map(p =>
-        p.id === projectId && !p.teammates.includes(user.name) && p.teammates.length < p.maxTeam
-          ? { ...p, teammates: [...p.teammates, user.name] }
-          : p
-      );
-      saveProjects(updated);
-      return updated;
-    });
+  const addProject = useCallback(async (project: Omit<Project, 'id' | 'timestamp'>) => {
+    const id = Crypto.randomUUID();
+    try {
+      const res = await fetch(`${API_BASE}api/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...project, id }),
+      });
+      if (!res.ok) throw new Error('Failed to create project');
+      const data = await res.json();
+      // Socket will broadcast and update state; also update locally for instant feedback
+      if (isMounted.current) {
+        setProjects(prev => {
+          if (prev.find(p => p.id === data.project.id)) return prev;
+          return [data.project, ...prev];
+        });
+      }
+    } catch (err) {
+      console.error('addProject error:', err);
+    }
+  }, []);
+
+  const joinProject = useCallback(async (projectId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}api/projects/${encodeURIComponent(projectId)}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userName: user.name }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (isMounted.current) {
+        setProjects(prev => prev.map(p => p.id === projectId ? data.project : p));
+      }
+    } catch (err) {
+      console.error('joinProject error:', err);
+    }
   }, [user.name]);
 
   const joinEvent = useCallback((eventId: string) => {
@@ -247,82 +319,81 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (Platform.OS === 'web') {
       return { added: 0, denied: true };
     }
-
     try {
       const { status } = await Contacts.requestPermissionsAsync();
-      if (status !== 'granted') {
-        return { added: 0, denied: true };
-      }
+      if (status !== 'granted') return { added: 0, denied: true };
 
       const { data } = await Contacts.getContactsAsync({
         fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
         sort: Contacts.SortTypes.FirstName,
       });
 
-      if (!data || data.length === 0) {
-        return { added: 0, denied: false };
-      }
+      if (!data || data.length === 0) return { added: 0, denied: false };
 
-      const existingIds = new Set(members.map(m => m.id));
-      const newMembers: Member[] = [];
-      for (const contact of data) {
-        const contactName = contact.name;
-        if (!contactName) continue;
-        const contactId = `contact_${contact.id}`;
-        if (existingIds.has(contactId)) continue;
-        const phone = contact.phoneNumbers?.[0]?.number;
-        newMembers.push({
-          id: contactId,
-          name: contactName,
-          phone: phone || undefined,
-          avatar: contactName[0]?.toUpperCase() || '?',
-          addedAt: Date.now(),
-        });
-      }
+      const currentMembers = await fetch(`${API_BASE}api/members`).then(r => r.json()).then(d => d.members as Member[]).catch(() => [] as Member[]);
+      const existingIds = new Set(currentMembers.map((m: Member) => m.id));
 
-      if (newMembers.length > 0) {
-        setMembers(prev => {
-          const updated = [...prev, ...newMembers];
-          saveMembers(updated);
-          return updated;
-        });
-      }
+      const toAdd = data
+        .filter(c => c.name)
+        .map(c => {
+          const phone = c.phoneNumbers?.[0]?.number;
+          const id = phone
+            ? 'phone_' + phone.replace(/\D/g, '')
+            : 'contact_' + (c.id || Crypto.randomUUID().slice(0, 8));
+          return { id, name: c.name!, phone, avatar: c.name![0]?.toUpperCase() || '?' };
+        })
+        .filter(m => !existingIds.has(m.id));
 
-      return { added: newMembers.length, denied: false };
+      if (toAdd.length === 0) return { added: 0, denied: false };
+
+      const res = await fetch(`${API_BASE}api/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ members: toAdd }),
+      });
+      if (!res.ok) return { added: 0, denied: false };
+      const result = await res.json();
+      return { added: result.added?.length || 0, denied: false };
     } catch (error) {
       console.error('Failed to access contacts:', error);
       return { added: 0, denied: false };
     }
-  }, [members]);
+  }, []);
 
-  const addSelectedMembers = useCallback((selected: { id: string; name: string; phone?: string; avatar: string }[]): number => {
-    const existingIds = new Set(members.map(m => m.id));
-    const newMembers: Member[] = selected
-      .filter(s => !existingIds.has(s.id))
-      .map(s => ({
-        id: s.id,
-        name: s.name,
-        phone: s.phone,
-        avatar: s.avatar,
-        addedAt: Date.now(),
-      }));
-
-    if (newMembers.length > 0) {
-      setMembers(prev => {
-        const updated = [...prev, ...newMembers];
-        saveMembers(updated);
-        return updated;
+  const addSelectedMembers = useCallback(async (selected: { id: string; name: string; phone?: string; avatar: string }[]): Promise<number> => {
+    try {
+      const res = await fetch(`${API_BASE}api/members`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ members: selected }),
       });
+      if (!res.ok) return 0;
+      const result = await res.json();
+      const added = result.added?.length || 0;
+      if (added > 0 && isMounted.current) {
+        setMembers(prev => {
+          const existingIds = new Set(prev.map(m => m.id));
+          const newOnes = result.added.filter((m: Member) => !existingIds.has(m.id));
+          return newOnes.length > 0 ? [...prev, ...newOnes] : prev;
+        });
+      }
+      return added;
+    } catch {
+      return 0;
     }
-    return newMembers.length;
-  }, [members]);
+  }, []);
 
-  const removeMember = useCallback((memberId: string) => {
-    setMembers(prev => {
-      const updated = prev.filter(m => m.id !== memberId);
-      saveMembers(updated);
-      return updated;
-    });
+  const removeMember = useCallback(async (memberId: string) => {
+    try {
+      await fetch(`${API_BASE}api/members/${encodeURIComponent(memberId)}`, {
+        method: 'DELETE',
+      });
+      if (isMounted.current) {
+        setMembers(prev => prev.filter(m => m.id !== memberId));
+      }
+    } catch (err) {
+      console.error('removeMember error:', err);
+    }
   }, []);
 
   const value = useMemo(() => ({

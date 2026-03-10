@@ -7,7 +7,7 @@ export function initSocketIO(httpServer: HttpServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
     cors: {
       origin: "*",
-      methods: ["GET", "POST"],
+      methods: ["GET", "POST", "DELETE"],
     },
     transports: ["websocket", "polling"],
     pingTimeout: 20000,
@@ -57,4 +57,9 @@ export function broadcastMessage(
 export function broadcastDelete(roomId: string, messageId: string) {
   if (!io) return;
   io.to(roomId).emit("delete_message", { messageId });
+}
+
+export function broadcastGlobal(event: string, data: unknown) {
+  if (!io) return;
+  io.emit(event, data);
 }
