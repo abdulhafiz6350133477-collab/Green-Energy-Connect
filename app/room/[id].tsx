@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, Pressable, Platform, TextInput,
-  FlatList, KeyboardAvoidingView, ActivityIndicator, Alert, Modal,
+  FlatList, KeyboardAvoidingView, ActivityIndicator, Alert, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -10,7 +10,7 @@ import { useApp } from '@/contexts/AppContext';
 import Colors from '@/constants/colors';
 import * as Haptics from 'expo-haptics';
 import Animated, {
-  useSharedValue, useAnimatedStyle, withSpring, withTiming, FadeIn, FadeOut,
+  useSharedValue, useAnimatedStyle, withSpring, FadeIn,
 } from 'react-native-reanimated';
 import { getApiUrl } from '@/lib/query-client';
 import { getSocket, joinRoom, leaveRoom } from '@/lib/socket';
@@ -32,112 +32,86 @@ function toNum(v: unknown): number {
   return 0;
 }
 
+function formatTime(ts: number): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  const h = d.getHours();
+  const m = d.getMinutes().toString().padStart(2, '0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const hour = h % 12 || 12;
+  return `${hour}:${m} ${ampm}`;
+}
+
+// ─── Avatar ───────────────────────────────────────────────────────────────────
+function Avatar({ name, uri }: { name: string; uri?: string }) {
+  if (uri) {
+    return <Image source={{ uri }} style={styles.avatar} />;
+  }
+  return (
+    <View style={styles.avatar}>
+      <Text style={styles.avatarText}>{name[0]?.toUpperCase() || '?'}</Text>
+    </View>
+  );
+}
+
 // ─── Message Bubble ───────────────────────────────────────────────────────────
 interface BubbleProps {
   message: Message;
   isMe: boolean;
-  onLongPress: (message: Message) => void;
+  showAvatar: boolean;
+  showName: boolean;
+  onLongPress: (msg: Message) => void;
 }
 
-function MessageBubble({ message, isMe, onLongPress }: BubbleProps) {
-  const time = new Date(message.timestamp);
-  const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function MessageBubble({ message, isMe, showAvatar, showName, onLongPress }: BubbleProps) {
   const scale = useSharedValue(1);
   const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
   const handleLongPress = () => {
-    if (!isMe) return; // Only own messages can be deleted
+    if (!isMe) return;
     scale.value = withSpring(0.96, {}, () => { scale.value = withSpring(1); });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     onLongPress(message);
   };
 
   return (
-    <Animated.View entering={FadeIn.duration(200)} style={[styles.messageRow, isMe && styles.messageRowMe]}>
+    <View style={[styles.msgRow, isMe ? styles.msgRowMe : styles.msgRowThem]}>
+      {/* Avatar placeholder for alignment (other side) */}
       {!isMe && (
-        <View style={styles.messageSenderAvatar}>
-          <Text style={styles.messageSenderAvatarText}>
-            {message.userName[0]?.toUpperCase() || '?'}
-          </Text>
+        <View style={styles.avatarSlot}>
+          {showAvatar && <Avatar name={message.userName} />}
         </View>
       )}
-      <Animated.View style={animStyle}>
-        <Pressable
-          onLongPress={isMe ? handleLongPress : undefined}
-          delayLongPress={400}
-          style={({ pressed }) => [
-            styles.messageBubble,
-            isMe ? styles.messageBubbleMe : styles.messageBubbleOther,
-            pressed && isMe && { opacity: 0.85 },
-          ]}
-        >
-          {!isMe && <Text style={styles.messageSender}>{message.userName}</Text>}
-          <Text style={[styles.messageText, isMe && styles.messageTextMe]}>{message.text}</Text>
-          <Text style={[styles.messageTime, isMe && styles.messageTimeMe]}>{timeStr}</Text>
-        </Pressable>
-      </Animated.View>
-    </Animated.View>
-  );
-}
 
-// ─── Delete Action Sheet ──────────────────────────────────────────────────────
-interface DeleteSheetProps {
-  message: Message | null;
-  visible: boolean;
-  isDeleting: boolean;
-  onDelete: () => void;
-  onCancel: () => void;
-}
+      <View style={[styles.msgGroup, isMe ? styles.msgGroupMe : styles.msgGroupThem]}>
+        {/* Sender name above bubble (only for others, first in group) */}
+        {!isMe && showName && (
+          <Text style={styles.senderName}>{message.userName}</Text>
+        )}
 
-function DeleteSheet({ message, visible, isDeleting, onDelete, onCancel }: DeleteSheetProps) {
-  const insets = useSafeAreaInsets();
-  if (!message) return null;
-
-  const preview = message.text.length > 60
-    ? message.text.slice(0, 60) + '…'
-    : message.text;
-
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onCancel}
-    >
-      <Pressable style={styles.overlay} onPress={onCancel}>
-        <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]} onPress={() => {}}>
-          <View style={styles.sheetHandle} />
-
-          <View style={styles.sheetPreview}>
-            <Ionicons name="chatbubble-outline" size={18} color={Colors.dark.textMuted} />
-            <Text style={styles.sheetPreviewText} numberOfLines={2}>{preview}</Text>
-          </View>
-
-          <View style={styles.sheetDivider} />
-
+        <Animated.View style={animStyle}>
           <Pressable
-            onPress={onDelete}
-            disabled={isDeleting}
-            style={({ pressed }) => [styles.sheetAction, styles.sheetActionDelete, pressed && { opacity: 0.7 }]}
+            onLongPress={isMe ? handleLongPress : undefined}
+            delayLongPress={450}
+            style={({ pressed }) => [
+              styles.bubble,
+              isMe ? styles.bubbleMe : styles.bubbleThem,
+              pressed && isMe && { opacity: 0.82 },
+            ]}
           >
-            {isDeleting
-              ? <ActivityIndicator size="small" color="#FF5252" />
-              : <Ionicons name="trash-outline" size={20} color="#FF5252" />
-            }
-            <Text style={styles.sheetActionDeleteText}>
-              {isDeleting ? 'Deleting...' : 'Delete Message'}
+            <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem]}>
+              {message.text}
+            </Text>
+            <Text style={[styles.msgTime, isMe ? styles.msgTimeMe : styles.msgTimeThem]}>
+              {formatTime(message.timestamp)}
             </Text>
           </Pressable>
+        </Animated.View>
+      </View>
 
-          <Pressable
-            onPress={onCancel}
-            style={({ pressed }) => [styles.sheetAction, pressed && { opacity: 0.7 }]}
-          >
-            <Text style={styles.sheetActionCancelText}>Cancel</Text>
-          </Pressable>
-        </Pressable>
-      </Pressable>
-    </Modal>
+      {isMe && <View style={styles.avatarSlotRight} />}
+    </View>
   );
 }
 
@@ -153,8 +127,6 @@ export default function RoomScreen() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
 
   const flatListRef = useRef<FlatList>(null);
   const lastTimestampRef = useRef<number>(0);
@@ -167,7 +139,6 @@ export default function RoomScreen() {
   const sendScale = useSharedValue(1);
   const sendAnimStyle = useAnimatedStyle(() => ({ transform: [{ scale: sendScale.value }] }));
 
-  // Merge new messages, deduplicated by id
   const mergeMessages = useCallback((incoming: Message[]) => {
     if (!isMounted.current || incoming.length === 0) return;
     setMessages(prev => {
@@ -181,32 +152,23 @@ export default function RoomScreen() {
     });
   }, []);
 
-  // Remove a message by id
   const removeMessage = useCallback((messageId: string) => {
     if (!isMounted.current) return;
     setMessages(prev => prev.filter(m => m.id !== messageId));
   }, []);
 
-  // Fetch from REST API
   const fetchMessages = useCallback(async (since = 0) => {
     if (!id || !isMounted.current) return;
     try {
       const url = `${API_BASE}api/messages/${encodeURIComponent(id)}?since=${since}&t=${Date.now()}`;
-      const res = await fetch(url, {
-        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
-        cache: 'no-store' as RequestCache,
-      });
+      const res = await fetch(url, { headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' }, cache: 'no-store' as RequestCache });
       if (!res.ok || !isMounted.current) return;
       const data = await res.json();
-      const incoming: Message[] = (data.messages || []).map((m: any) => ({
-        ...m,
-        timestamp: toNum(m.timestamp),
-      }));
+      const incoming: Message[] = (data.messages || []).map((m: any) => ({ ...m, timestamp: toNum(m.timestamp) }));
       mergeMessages(incoming);
     } catch { /* silent */ }
   }, [id, mergeMessages]);
 
-  // Socket.IO + polling setup
   useEffect(() => {
     if (!id) return;
     isMounted.current = true;
@@ -220,25 +182,15 @@ export default function RoomScreen() {
     init();
 
     const socket = getSocket();
-
-    const onConnect = () => {
-      if (isMounted.current) { setConnected(true); joinRoom(id); }
-    };
+    const onConnect = () => { if (isMounted.current) { setConnected(true); joinRoom(id); } };
     const onDisconnect = () => { if (isMounted.current) setConnected(false); };
-    const onNewMessage = (msg: any) => {
-      if (!isMounted.current) return;
-      mergeMessages([{ ...msg, timestamp: toNum(msg.timestamp) }]);
-    };
-    const onDeleteMessage = ({ messageId }: { messageId: string }) => {
-      if (!isMounted.current) return;
-      removeMessage(messageId);
-    };
+    const onNewMessage = (msg: any) => { if (!isMounted.current) return; mergeMessages([{ ...msg, timestamp: toNum(msg.timestamp) }]); };
+    const onDeleteMessage = ({ messageId }: { messageId: string }) => { if (!isMounted.current) return; removeMessage(messageId); };
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('new_message', onNewMessage);
     socket.on('delete_message', onDeleteMessage);
-
     if (socket.connected) { setConnected(true); joinRoom(id); }
 
     pollIntervalRef.current = setInterval(() => {
@@ -260,13 +212,11 @@ export default function RoomScreen() {
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
     if (!text || !id || isSending) return;
-
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     sendScale.value = withSpring(0.85, {}, () => { sendScale.value = withSpring(1); });
     setSendError(null);
     setIsSending(true);
     setInputText('');
-
     try {
       const res = await fetch(`${API_BASE}api/messages`, {
         method: 'POST',
@@ -289,38 +239,61 @@ export default function RoomScreen() {
     }
   }, [inputText, id, isSending, user, mergeMessages]);
 
-  const handleDeleteConfirm = useCallback(async () => {
-    if (!selectedMessage) return;
-    setIsDeleting(true);
-    try {
-      const res = await fetch(`${API_BASE}api/messages/message/${encodeURIComponent(selectedMessage.id)}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id }),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error((errData as any).error || 'Delete failed');
-      }
-      // Remove from local state immediately
-      removeMessage(selectedMessage.id);
-      setSelectedMessage(null);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Could not delete message';
-      Alert.alert('Delete Failed', msg);
-    } finally {
-      setIsDeleting(false);
-    }
-  }, [selectedMessage, user.id, removeMessage]);
+  const handleLongPress = useCallback((msg: Message) => {
+    Alert.alert(
+      'Delete Message',
+      'Remove this message for everyone?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const res = await fetch(`${API_BASE}api/messages/message/${encodeURIComponent(msg.id)}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: user.id }),
+              });
+              if (res.ok) {
+                removeMessage(msg.id);
+                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              } else {
+                const e = await res.json().catch(() => ({}));
+                Alert.alert('Error', (e as any).error || 'Could not delete');
+              }
+            } catch {
+              Alert.alert('Error', 'Could not delete message');
+            }
+          },
+        },
+      ]
+    );
+  }, [user.id, removeMessage]);
 
-  const renderMessage = useCallback(({ item }: { item: Message }) => (
-    <MessageBubble
-      message={item}
-      isMe={item.userId === user.id}
-      onLongPress={setSelectedMessage}
-    />
-  ), [user.id]);
+  const renderMessage = useCallback(({ item, index }: { item: Message; index: number }) => {
+    const isMe = item.userId === user.id;
+    const prevMsg = index > 0 ? messages[index - 1] : null;
+    const nextMsg = index < messages.length - 1 ? messages[index + 1] : null;
+
+    const sameUserAsPrev = prevMsg?.userId === item.userId;
+    const sameUserAsNext = nextMsg?.userId === item.userId;
+
+    // Show avatar on the last message of a group from the same user
+    const showAvatar = !sameUserAsNext;
+    // Show name on the first message of a group
+    const showName = !isMe && !sameUserAsPrev;
+
+    return (
+      <MessageBubble
+        message={item}
+        isMe={isMe}
+        showAvatar={showAvatar}
+        showName={showName}
+        onLongPress={handleLongPress}
+      />
+    );
+  }, [user.id, messages, handleLongPress]);
 
   const keyExtractor = useCallback((item: Message) => item.id, []);
 
@@ -343,42 +316,36 @@ export default function RoomScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      {/* Delete sheet */}
-      <DeleteSheet
-        message={selectedMessage}
-        visible={!!selectedMessage}
-        isDeleting={isDeleting}
-        onDelete={handleDeleteConfirm}
-        onCancel={() => setSelectedMessage(null)}
-      />
-
       {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + webTopInset + 8 }]}>
+      <View style={[styles.header, { paddingTop: insets.top + webTopInset + 10 }]}>
         <Pressable
           onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); router.back(); }}
           style={({ pressed }) => [styles.backButton, pressed && { opacity: 0.7 }]}
         >
           <Ionicons name="chevron-back" size={24} color={Colors.dark.text} />
         </Pressable>
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle} numberOfLines={1}>{room.name}</Text>
-          <View style={styles.headerMeta}>
-            <View style={[styles.headerDot, { backgroundColor: connected ? Colors.dark.green : Colors.dark.textMuted }]} />
-            <Text style={[styles.headerSubtitle, { color: connected ? Colors.dark.green : Colors.dark.textMuted }]}>
-              {connected
-                ? `${members.length} member${members.length !== 1 ? 's' : ''} · live`
-                : 'connecting...'}
-            </Text>
+        <View style={styles.headerInfo}>
+          <View style={styles.headerRoomIcon}>
+            <Ionicons name={room.icon as any} size={16} color={Colors.dark.green} />
+          </View>
+          <View>
+            <Text style={styles.headerTitle} numberOfLines={1}>{room.name}</Text>
+            <View style={styles.headerStatus}>
+              <View style={[styles.dot, { backgroundColor: connected ? Colors.dark.green : Colors.dark.textMuted }]} />
+              <Text style={[styles.headerSub, { color: connected ? Colors.dark.green : Colors.dark.textMuted }]}>
+                {connected ? `${members.length} members · live` : 'connecting...'}
+              </Text>
+            </View>
           </View>
         </View>
-        <View style={styles.headerRight} />
+        <View style={{ width: 40 }} />
       </View>
 
       {/* Messages */}
       {loadingMessages ? (
-        <View style={styles.loadingContainer}>
+        <View style={styles.loadingBox}>
           <ActivityIndicator color={Colors.dark.green} size="large" />
-          <Text style={styles.loadingText}>Loading messages...</Text>
+          <Text style={styles.loadingText}>Loading...</Text>
         </View>
       ) : (
         <FlatList
@@ -386,61 +353,54 @@ export default function RoomScreen() {
           data={messages}
           renderItem={renderMessage}
           keyExtractor={keyExtractor}
-          contentContainerStyle={styles.messagesList}
+          contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
           onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
           ListEmptyComponent={
-            <View style={styles.emptyChat}>
-              <Ionicons name="chatbubble-outline" size={40} color={Colors.dark.textMuted} />
-              <Text style={styles.emptyChatText}>No messages yet</Text>
-              <Text style={styles.emptyChatSubtext}>Be the first to say something</Text>
+            <View style={styles.emptyBox}>
+              <Ionicons name="chatbubble-ellipses-outline" size={44} color={Colors.dark.textMuted} />
+              <Text style={styles.emptyTitle}>No messages yet</Text>
+              <Text style={styles.emptySub}>Be the first to say something</Text>
             </View>
           }
         />
       )}
 
-      {/* Send error */}
+      {/* Error banner */}
       {sendError && (
         <View style={styles.errorBanner}>
-          <Ionicons name="alert-circle" size={16} color="#FF5252" />
-          <Text style={styles.errorBannerText}>{sendError}</Text>
+          <Ionicons name="alert-circle" size={15} color="#FF5252" />
+          <Text style={styles.errorBannerText} numberOfLines={1}>{sendError}</Text>
           <Pressable onPress={() => setSendError(null)}>
-            <Ionicons name="close" size={16} color={Colors.dark.textMuted} />
+            <Ionicons name="close" size={15} color={Colors.dark.textMuted} />
           </Pressable>
         </View>
       )}
 
       {/* Input */}
-      <View style={[styles.inputContainer, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 0) + 8 }]}>
-        <View style={styles.inputWrapper}>
+      <View style={[styles.inputBar, { paddingBottom: insets.bottom + (Platform.OS === 'web' ? 34 : 0) + 8 }]}>
+        <View style={styles.inputWrap}>
           <TextInput
             style={styles.input}
             value={inputText}
-            onChangeText={(t) => { setSendError(null); setInputText(t); }}
-            placeholder="Say something..."
+            onChangeText={t => { setSendError(null); setInputText(t); }}
+            placeholder="Message..."
             placeholderTextColor={Colors.dark.textMuted}
             multiline
             maxLength={500}
             returnKeyType="send"
-            onSubmitEditing={handleSend}
+            onSubmitEditing={Platform.OS !== 'web' ? handleSend : undefined}
           />
           <Animated.View style={sendAnimStyle}>
             <Pressable
               onPress={handleSend}
               testID="send-button"
-              style={[
-                styles.sendButton,
-                !!inputText.trim() && !isSending && styles.sendButtonActive,
-              ]}
               disabled={!inputText.trim() || isSending}
+              style={[styles.sendBtn, !!inputText.trim() && !isSending && styles.sendBtnActive]}
             >
               {isSending
                 ? <ActivityIndicator size="small" color={Colors.dark.background} />
-                : <Ionicons
-                    name="arrow-up"
-                    size={20}
-                    color={inputText.trim() ? Colors.dark.background : Colors.dark.textMuted}
-                  />
+                : <Ionicons name="arrow-up" size={18} color={inputText.trim() ? Colors.dark.background : Colors.dark.textMuted} />
               }
             </Pressable>
           </Animated.View>
@@ -455,101 +415,147 @@ const styles = StyleSheet.create({
 
   // Header
   header: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 12, paddingBottom: 12,
-    borderBottomWidth: 1, borderBottomColor: Colors.dark.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingBottom: 12,
     backgroundColor: Colors.dark.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.dark.border,
+    gap: 6,
   },
-  backButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  headerCenter: { flex: 1, alignItems: 'center', gap: 2 },
-  headerTitle: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 17, color: Colors.dark.text },
-  headerMeta: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  headerDot: { width: 6, height: 6, borderRadius: 3 },
-  headerSubtitle: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 12 },
-  headerRight: { width: 40 },
+  backButton: { width: 38, height: 38, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
+  headerInfo: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerRoomIcon: {
+    width: 34, height: 34, borderRadius: 10,
+    backgroundColor: Colors.dark.greenGlowSubtle,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: Colors.dark.greenGlow,
+  },
+  headerTitle: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 15, color: Colors.dark.text },
+  headerStatus: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 1 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  headerSub: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 11 },
 
   // Loading
-  loadingContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
+  loadingBox: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14 },
   loadingText: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 14, color: Colors.dark.textSecondary },
 
-  // Messages
-  messagesList: { paddingHorizontal: 16, paddingVertical: 16, gap: 6, flexGrow: 1 },
-  messageRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, marginBottom: 4 },
-  messageRowMe: { justifyContent: 'flex-end' },
-  messageSenderAvatar: {
+  // Messages list
+  listContent: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8, flexGrow: 1 },
+
+  // Message row layout
+  msgRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginBottom: 2,
+    paddingHorizontal: 2,
+  },
+  msgRowMe: { justifyContent: 'flex-end' },
+  msgRowThem: { justifyContent: 'flex-start' },
+
+  // Avatar
+  avatarSlot: { width: 32, marginRight: 6, alignItems: 'center', justifyContent: 'flex-end' },
+  avatarSlotRight: { width: 8 },
+  avatar: {
     width: 30, height: 30, borderRadius: 15,
     backgroundColor: Colors.dark.greenGlowSubtle,
-    alignItems: 'center', justifyContent: 'center', marginBottom: 2,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: Colors.dark.greenGlow,
   },
-  messageSenderAvatarText: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 12, color: Colors.dark.green },
-  messageBubble: { maxWidth: '75%', borderRadius: 18, paddingHorizontal: 14, paddingVertical: 10, gap: 2 },
-  messageBubbleMe: { backgroundColor: Colors.dark.green, borderBottomRightRadius: 6 },
-  messageBubbleOther: { backgroundColor: Colors.dark.surfaceElevated, borderBottomLeftRadius: 6 },
-  messageSender: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 12, color: Colors.dark.green, marginBottom: 2 },
-  messageText: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 15, color: Colors.dark.text, lineHeight: 21 },
-  messageTextMe: { color: Colors.dark.background },
-  messageTime: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 10, color: Colors.dark.textMuted, alignSelf: 'flex-end' },
-  messageTimeMe: { color: 'rgba(0, 0, 0, 0.5)' },
+  avatarText: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 11, color: Colors.dark.green },
+
+  // Message group
+  msgGroup: { maxWidth: '72%' },
+  msgGroupMe: { alignItems: 'flex-end' },
+  msgGroupThem: { alignItems: 'flex-start' },
+
+  senderName: {
+    fontFamily: 'SpaceGrotesk_600SemiBold',
+    fontSize: 11,
+    color: Colors.dark.green,
+    marginBottom: 3,
+    marginLeft: 12,
+  },
+
+  // Bubble
+  bubble: {
+    borderRadius: 18,
+    paddingHorizontal: 13,
+    paddingTop: 9,
+    paddingBottom: 7,
+    maxWidth: '100%',
+  },
+  bubbleMe: {
+    backgroundColor: Colors.dark.green,
+    borderBottomRightRadius: 5,
+  },
+  bubbleThem: {
+    backgroundColor: Colors.dark.surfaceElevated,
+    borderBottomLeftRadius: 5,
+    borderWidth: 1,
+    borderColor: Colors.dark.border,
+  },
+
+  msgText: {
+    fontFamily: 'SpaceGrotesk_400Regular',
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  msgTextMe: { color: '#0A0A0A' },
+  msgTextThem: { color: Colors.dark.text },
+
+  msgTime: {
+    fontFamily: 'SpaceGrotesk_400Regular',
+    fontSize: 10,
+    marginTop: 3,
+    alignSelf: 'flex-end',
+  },
+  msgTimeMe: { color: 'rgba(0,0,0,0.45)' },
+  msgTimeThem: { color: Colors.dark.textMuted },
 
   // Empty
-  emptyChat: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80, gap: 8 },
-  emptyChatText: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 16, color: Colors.dark.textSecondary },
-  emptyChatSubtext: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 14, color: Colors.dark.textMuted },
+  emptyBox: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80, gap: 8 },
+  emptyTitle: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 16, color: Colors.dark.textSecondary },
+  emptySub: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 13, color: Colors.dark.textMuted },
 
-  // Error banner
+  // Error
   errorBanner: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: 16, paddingVertical: 10,
-    backgroundColor: 'rgba(255, 82, 82, 0.12)',
-    borderTopWidth: 1, borderTopColor: 'rgba(255, 82, 82, 0.3)',
+    paddingHorizontal: 16, paddingVertical: 9,
+    backgroundColor: 'rgba(255,82,82,0.1)',
+    borderTopWidth: 1, borderTopColor: 'rgba(255,82,82,0.25)',
   },
   errorBannerText: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 13, color: '#FF5252', flex: 1 },
 
-  // Input
-  inputContainer: {
-    paddingHorizontal: 12, paddingTop: 8,
+  // Input bar
+  inputBar: {
+    paddingHorizontal: 10, paddingTop: 8,
     borderTopWidth: 1, borderTopColor: Colors.dark.border,
     backgroundColor: Colors.dark.surface,
   },
-  inputWrapper: {
+  inputWrap: {
     flexDirection: 'row', alignItems: 'flex-end', gap: 8,
     backgroundColor: Colors.dark.surfaceElevated,
-    borderRadius: 22, paddingLeft: 16, paddingRight: 6, paddingVertical: 6,
+    borderRadius: 24, paddingLeft: 16, paddingRight: 5, paddingVertical: 5,
     borderWidth: 1, borderColor: Colors.dark.border,
   },
-  input: { flex: 1, fontFamily: 'SpaceGrotesk_400Regular', fontSize: 15, color: Colors.dark.text, maxHeight: 100, paddingVertical: 6 },
-  sendButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: Colors.dark.surfaceElevated, alignItems: 'center', justifyContent: 'center' },
-  sendButtonActive: { backgroundColor: Colors.dark.green },
+  input: {
+    flex: 1,
+    fontFamily: 'SpaceGrotesk_400Regular',
+    fontSize: 15, color: Colors.dark.text,
+    maxHeight: 100, paddingVertical: 6,
+  },
+  sendBtn: {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: Colors.dark.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sendBtnActive: { backgroundColor: Colors.dark.green },
 
   // Error state
   errorState: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   errorText: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 16, color: Colors.dark.textMuted },
   backBtn: { backgroundColor: Colors.dark.surface, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.dark.border, marginTop: 8 },
   backBtnText: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 14, color: Colors.dark.text },
-
-  // Delete sheet
-  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
-  sheet: {
-    backgroundColor: Colors.dark.surface,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingTop: 12,
-    paddingHorizontal: 16,
-    borderTopWidth: 1,
-    borderColor: Colors.dark.border,
-  },
-  sheetHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: Colors.dark.border, alignSelf: 'center', marginBottom: 16 },
-  sheetPreview: {
-    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
-    backgroundColor: Colors.dark.surfaceElevated,
-    borderRadius: 14, padding: 14,
-    borderWidth: 1, borderColor: Colors.dark.border,
-    marginBottom: 16,
-  },
-  sheetPreviewText: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 14, color: Colors.dark.textSecondary, flex: 1, lineHeight: 20 },
-  sheetDivider: { height: 1, backgroundColor: Colors.dark.border, marginBottom: 12 },
-  sheetAction: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 16, paddingHorizontal: 4 },
-  sheetActionDelete: { gap: 12 },
-  sheetActionDeleteText: { fontFamily: 'SpaceGrotesk_600SemiBold', fontSize: 16, color: '#FF5252' },
-  sheetActionCancelText: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 16, color: Colors.dark.textSecondary, textAlign: 'center', flex: 1 },
 });

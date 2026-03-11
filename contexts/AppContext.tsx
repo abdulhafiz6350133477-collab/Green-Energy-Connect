@@ -81,10 +81,10 @@ const DEFAULT_ROOMS: Room[] = [
 ];
 
 const DEFAULT_EVENTS: GangEvent[] = [
-  { id: '1', title: 'Weekly Vibe Check', description: 'Share your week, wins, and what you learned. No pressure, just vibes.', type: 'discussion', date: 'Every Friday', time: '8:00 PM', attendees: 0, maxAttendees: 30, joined: false },
-  { id: '2', title: 'Game Night', description: 'Trivia, word games, and good energy. Bring your competitive spirit.', type: 'game', date: 'Saturday', time: '9:00 PM', attendees: 0, maxAttendees: 20, joined: false },
-  { id: '3', title: 'Open Mic Call', description: 'Jump on a live group call. Talk projects, ideas, or just hang out.', type: 'call', date: 'Wednesday', time: '7:00 PM', attendees: 0, maxAttendees: 15, joined: false },
-  { id: '4', title: 'Friendly Debate', description: 'Pick a topic, pick a side. Keep it respectful, keep it real.', type: 'debate', date: 'Sunday', time: '6:00 PM', attendees: 0, maxAttendees: 25, joined: false },
+  { id: '1', title: 'Weekly Vibe Check', description: 'Share your week, wins, and what you learned.', type: 'discussion', date: 'Every Friday', time: '8:00 PM', attendees: 0, maxAttendees: 30, joined: false },
+  { id: '2', title: 'Game Night', description: 'Trivia, word games, and good energy.', type: 'game', date: 'Saturday', time: '9:00 PM', attendees: 0, maxAttendees: 20, joined: false },
+  { id: '3', title: 'Open Mic Call', description: 'Jump on a live group call. Talk projects or hang out.', type: 'call', date: 'Wednesday', time: '7:00 PM', attendees: 0, maxAttendees: 15, joined: false },
+  { id: '4', title: 'Friendly Debate', description: 'Pick a topic, pick a side. Keep it real.', type: 'debate', date: 'Sunday', time: '6:00 PM', attendees: 0, maxAttendees: 25, joined: false },
 ];
 
 interface AppContextValue {
@@ -94,9 +94,13 @@ interface AppContextValue {
   projects: Project[];
   events: GangEvent[];
   members: Member[];
+  isAdmin: boolean;
+  adminName: string | null;
   activeMembers: number;
   pulseIntensity: number;
   hasSeenWelcome: boolean;
+  notification: string | null;
+  clearNotification: () => void;
   setHasSeenWelcome: (v: boolean) => void;
   sendMessage: (roomId: string, text: string) => void;
   addProject: (project: Omit<Project, 'id' | 'timestamp'>) => void;
@@ -104,7 +108,6 @@ interface AppContextValue {
   joinEvent: (eventId: string) => void;
   updateProfile: (updates: Partial<UserProfile>) => void;
   getMessagesForRoom: (roomId: string) => Message[];
-  addMembersFromContacts: () => Promise<{ added: number; denied: boolean }>;
   addSelectedMembers: (selected: { id: string; name: string; phone?: string; avatar: string }[]) => Promise<number>;
   removeMember: (memberId: string) => void;
 }
@@ -123,19 +126,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     avatarUri: undefined,
   });
   const [rooms, setRooms] = useState<Room[]>(DEFAULT_ROOMS);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages] = useState<Message[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [events, setEvents] = useState<GangEvent[]>(DEFAULT_EVENTS);
   const [members, setMembers] = useState<Member[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminName, setAdminName] = useState<string | null>(null);
   const [hasSeenWelcome, setHasSeenWelcomeState] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [notification, setNotification] = useState<string | null>(null);
   const isMounted = useRef(true);
 
   const activeMembers = useMemo(() => members.length, [members]);
-  const pulseIntensity = useMemo(() => {
-    if (members.length === 0) return 0;
-    return Math.min(1, members.length / 15);
-  }, [members]);
+  const pulseIntensity = useMemo(() => Math.min(1, members.length / 15), [members]);
+
+  const clearNotification = useCallback(() => setNotification(null), []);
 
   useEffect(() => {
     isMounted.current = true;
@@ -145,9 +150,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const fetchMembers = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}api/members`, {
-        headers: { 'Cache-Control': 'no-cache' },
-      });
+      const res = await fetch(`${API_BASE}api/members`, { headers: { 'Cache-Control': 'no-cache' } });
       if (!res.ok || !isMounted.current) return;
       const data = await res.json();
       if (isMounted.current) setMembers(data.members || []);
@@ -156,12 +159,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const fetchProjects = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}api/projects`, {
-        headers: { 'Cache-Control': 'no-cache' },
-      });
+      const res = await fetch(`${API_BASE}api/projects`, { headers: { 'Cache-Control': 'no-cache' } });
       if (!res.ok || !isMounted.current) return;
       const data = await res.json();
       if (isMounted.current) setProjects(data.projects || []);
+    } catch { /* silent */ }
+  }, []);
+
+  const claimOrCheckAdmin = useCallback(async (deviceId: string, name: string) => {
+    try {
+      const res = await fetch(`${API_BASE}api/admin/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId, name }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (isMounted.current) {
+        setIsAdmin(data.isAdmin === true);
+        setAdminName(data.adminName || null);
+      }
     } catch { /* silent */ }
   }, []);
 
@@ -174,16 +191,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         AsyncStorage.getItem('gg_device_id'),
       ]);
 
-      // Generate or restore unique device ID
       let deviceId = savedDeviceId;
       if (!deviceId) {
         deviceId = 'device_' + Crypto.randomUUID().replace(/-/g, '').slice(0, 16);
         await AsyncStorage.setItem('gg_device_id', deviceId);
       }
 
+      let currentName = 'You';
       if (savedProfile) {
         const profile = JSON.parse(savedProfile);
-        // Always use the stable device ID
+        currentName = profile.name || 'You';
         setUser({ ...profile, id: deviceId });
       } else {
         setUser(prev => ({ ...prev, id: deviceId! }));
@@ -191,13 +208,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       if (savedEvents) setEvents(JSON.parse(savedEvents));
       if (savedWelcome === 'true') setHasSeenWelcomeState(true);
+
+      await Promise.all([
+        fetchMembers(),
+        fetchProjects(),
+        claimOrCheckAdmin(deviceId, currentName),
+      ]);
     } catch (e) {
       console.error('Failed to load data:', e);
     }
-
-    // Fetch server-synced data
-    await Promise.all([fetchMembers(), fetchProjects()]);
-
     if (isMounted.current) setIsLoaded(true);
   };
 
@@ -205,7 +224,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const socket = getSocket();
 
-    const onMembersUpdated = (data: { action: string; members?: Member[]; memberId?: string }) => {
+    const onMembersUpdated = (data: {
+      action: string;
+      members?: Member[];
+      memberId?: string;
+      notification?: string;
+    }) => {
       if (!isMounted.current) return;
       if (data.action === 'added' && data.members) {
         setMembers(prev => {
@@ -213,6 +237,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const newOnes = (data.members || []).filter(m => !existingIds.has(m.id));
           return newOnes.length > 0 ? [...prev, ...newOnes] : prev;
         });
+        if (data.notification) {
+          setNotification(data.notification);
+        }
       } else if (data.action === 'removed' && data.memberId) {
         setMembers(prev => prev.filter(m => m.id !== data.memberId));
       }
@@ -221,21 +248,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const onProjectsUpdated = (data: { action: string; project?: Project }) => {
       if (!isMounted.current) return;
       if (data.action === 'created' && data.project) {
-        setProjects(prev => {
-          if (prev.find(p => p.id === data.project!.id)) return prev;
-          return [data.project!, ...prev];
-        });
+        setProjects(prev => prev.find(p => p.id === data.project!.id) ? prev : [data.project!, ...prev]);
       } else if (data.action === 'updated' && data.project) {
         setProjects(prev => prev.map(p => p.id === data.project!.id ? data.project! : p));
       }
     };
 
+    const onAdminSet = (data: { adminDeviceId: string; adminName: string }) => {
+      if (!isMounted.current) return;
+      setAdminName(data.adminName);
+    };
+
     socket.on('members_updated', onMembersUpdated);
     socket.on('projects_updated', onProjectsUpdated);
+    socket.on('admin_set', onAdminSet);
 
     return () => {
       socket.off('members_updated', onMembersUpdated);
       socket.off('projects_updated', onProjectsUpdated);
+      socket.off('admin_set', onAdminSet);
     };
   }, []);
 
@@ -250,7 +281,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const sendMessage = useCallback((roomId: string, text: string) => {
     setRooms(prev => prev.map(r =>
-      r.id === roomId ? { ...r, lastMessage: text, lastMessageTime: Date.now(), messageCount: r.messageCount + 1 } : r
+      r.id === roomId
+        ? { ...r, lastMessage: text, lastMessageTime: Date.now(), messageCount: r.messageCount + 1 }
+        : r
     ));
   }, []);
 
@@ -262,14 +295,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...project, id }),
       });
-      if (!res.ok) throw new Error('Failed to create project');
+      if (!res.ok) return;
       const data = await res.json();
-      // Socket will broadcast and update state; also update locally for instant feedback
       if (isMounted.current) {
-        setProjects(prev => {
-          if (prev.find(p => p.id === data.project.id)) return prev;
-          return [data.project, ...prev];
-        });
+        setProjects(prev => prev.find(p => p.id === data.project.id) ? prev : [data.project, ...prev]);
       }
     } catch (err) {
       console.error('addProject error:', err);
@@ -296,7 +325,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const joinEvent = useCallback((eventId: string) => {
     setEvents(prev => {
       const updated = prev.map(e =>
-        e.id === eventId ? { ...e, joined: !e.joined, attendees: e.joined ? e.attendees - 1 : e.attendees + 1 } : e
+        e.id === eventId
+          ? { ...e, joined: !e.joined, attendees: e.joined ? e.attendees - 1 : e.attendees + 1 }
+          : e
       );
       saveEvents(updated);
       return updated;
@@ -307,6 +338,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUser(prev => {
       const updated = { ...prev, ...updates };
       AsyncStorage.setItem('gg_profile', JSON.stringify(updated)).catch(() => {});
+      // Also re-check admin with new name
+      if (updates.name && updates.name !== prev.name) {
+        fetch(`${API_BASE}api/admin/claim`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceId: prev.id, name: updates.name }),
+        }).catch(() => {});
+      }
       return updated;
     });
   }, []);
@@ -315,59 +354,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return messages.filter(m => m.roomId === roomId);
   }, [messages]);
 
-  const addMembersFromContacts = useCallback(async (): Promise<{ added: number; denied: boolean }> => {
-    if (Platform.OS === 'web') {
-      return { added: 0, denied: true };
-    }
-    try {
-      const { status } = await Contacts.requestPermissionsAsync();
-      if (status !== 'granted') return { added: 0, denied: true };
-
-      const { data } = await Contacts.getContactsAsync({
-        fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
-        sort: Contacts.SortTypes.FirstName,
-      });
-
-      if (!data || data.length === 0) return { added: 0, denied: false };
-
-      const currentMembers = await fetch(`${API_BASE}api/members`).then(r => r.json()).then(d => d.members as Member[]).catch(() => [] as Member[]);
-      const existingIds = new Set(currentMembers.map((m: Member) => m.id));
-
-      const toAdd = data
-        .filter(c => c.name)
-        .map(c => {
-          const phone = c.phoneNumbers?.[0]?.number;
-          const id = phone
-            ? 'phone_' + phone.replace(/\D/g, '')
-            : 'contact_' + (c.id || Crypto.randomUUID().slice(0, 8));
-          return { id, name: c.name!, phone, avatar: c.name![0]?.toUpperCase() || '?' };
-        })
-        .filter(m => !existingIds.has(m.id));
-
-      if (toAdd.length === 0) return { added: 0, denied: false };
-
-      const res = await fetch(`${API_BASE}api/members`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ members: toAdd }),
-      });
-      if (!res.ok) return { added: 0, denied: false };
-      const result = await res.json();
-      return { added: result.added?.length || 0, denied: false };
-    } catch (error) {
-      console.error('Failed to access contacts:', error);
-      return { added: 0, denied: false };
-    }
-  }, []);
-
-  const addSelectedMembers = useCallback(async (selected: { id: string; name: string; phone?: string; avatar: string }[]): Promise<number> => {
+  const addSelectedMembers = useCallback(async (
+    selected: { id: string; name: string; phone?: string; avatar: string }[]
+  ): Promise<number> => {
     try {
       const res = await fetch(`${API_BASE}api/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ members: selected }),
+        body: JSON.stringify({
+          members: selected,
+          adminDeviceId: user.id,
+          adminName: user.name,
+        }),
       });
-      if (!res.ok) return 0;
+      if (!res.ok) {
+        const err = await res.json();
+        console.error('addSelectedMembers error:', err);
+        return 0;
+      }
       const result = await res.json();
       const added = result.added?.length || 0;
       if (added > 0 && isMounted.current) {
@@ -381,28 +385,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } catch {
       return 0;
     }
-  }, []);
+  }, [user.id, user.name]);
 
   const removeMember = useCallback(async (memberId: string) => {
     try {
       await fetch(`${API_BASE}api/members/${encodeURIComponent(memberId)}`, {
         method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminDeviceId: user.id }),
       });
-      if (isMounted.current) {
-        setMembers(prev => prev.filter(m => m.id !== memberId));
-      }
+      if (isMounted.current) setMembers(prev => prev.filter(m => m.id !== memberId));
     } catch (err) {
       console.error('removeMember error:', err);
     }
-  }, []);
+  }, [user.id]);
 
   const value = useMemo(() => ({
-    user, rooms, messages, projects, events, members, activeMembers, pulseIntensity,
-    hasSeenWelcome, setHasSeenWelcome, sendMessage, addProject, joinProject,
-    joinEvent, updateProfile, getMessagesForRoom, addMembersFromContacts, addSelectedMembers, removeMember,
-  }), [user, rooms, messages, projects, events, members, activeMembers, pulseIntensity,
-    hasSeenWelcome, sendMessage, addProject, joinProject, joinEvent, updateProfile,
-    getMessagesForRoom, addMembersFromContacts, addSelectedMembers, removeMember]);
+    user, rooms, messages, projects, events, members,
+    isAdmin, adminName, activeMembers, pulseIntensity,
+    hasSeenWelcome, notification, clearNotification,
+    setHasSeenWelcome, sendMessage, addProject, joinProject,
+    joinEvent, updateProfile, getMessagesForRoom,
+    addSelectedMembers, removeMember,
+  }), [
+    user, rooms, messages, projects, events, members,
+    isAdmin, adminName, activeMembers, pulseIntensity,
+    hasSeenWelcome, notification, clearNotification,
+    sendMessage, addProject, joinProject, joinEvent, updateProfile,
+    getMessagesForRoom, addSelectedMembers, removeMember,
+  ]);
 
   if (!isLoaded) return null;
 

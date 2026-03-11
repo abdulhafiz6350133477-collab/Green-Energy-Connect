@@ -1,9 +1,11 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import { Pool } from "pg";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { initSocketIO, broadcastMessage, broadcastDelete, broadcastGlobal } from "./socket";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 async function query(sql: string, params: unknown[] = []) {
   const client = await pool.connect();
@@ -48,6 +50,13 @@ async function initDB() {
       status TEXT NOT NULL DEFAULT 'open'
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT * 1000
+    )
+  `);
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -67,16 +76,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
       res.setHeader("Pragma", "no-cache");
       const result = await query(
-        `SELECT id,
-                room_id   AS "roomId",
-                user_id   AS "userId",
-                user_name AS "userName",
-                text,
-                CAST(timestamp AS TEXT) AS timestamp
-         FROM messages
-         WHERE room_id = $1 AND timestamp >= $2
-         ORDER BY timestamp ASC
-         LIMIT 300`,
+        `SELECT id, room_id AS "roomId", user_id AS "userId", user_name AS "userName",
+                text, CAST(timestamp AS TEXT) AS timestamp
+         FROM messages WHERE room_id = $1 AND timestamp >= $2
+         ORDER BY timestamp ASC LIMIT 300`,
         [roomId, since]
       );
       const messages = result.rows.map((row: any) => ({
@@ -97,26 +100,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Missing required fields" });
       }
       if (typeof text !== "string" || text.trim().length === 0) {
-        return res.status(400).json({ error: "Message text cannot be empty" });
+        return res.status(400).json({ error: "Empty message" });
       }
       if (text.length > 2000) {
         return res.status(400).json({ error: "Message too long" });
       }
-      const sanitizedText = text.trim();
       const timestamp = Date.now();
       const result = await query(
         `INSERT INTO messages (room_id, user_id, user_name, text, timestamp)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id,
-                   room_id   AS "roomId",
-                   user_id   AS "userId",
-                   user_name AS "userName",
-                   text,
-                   CAST(timestamp AS TEXT) AS timestamp`,
-        [roomId, userId, userName, sanitizedText, timestamp]
+         RETURNING id, room_id AS "roomId", user_id AS "userId", user_name AS "userName",
+                   text, CAST(timestamp AS TEXT) AS timestamp`,
+        [roomId, userId, userName, text.trim(), timestamp]
       );
-      const row = result.rows[0];
-      const message = { ...row, timestamp: parseInt(row.timestamp, 10) };
+      const message = { ...result.rows[0], timestamp: parseInt(result.rows[0].timestamp, 10) };
       broadcastMessage(roomId, message);
       return res.status(201).json({ message });
     } catch (err) {
@@ -129,26 +126,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { messageId } = req.params;
       const { userId } = req.body;
-      if (!messageId || !userId) {
-        return res.status(400).json({ error: "Missing messageId or userId" });
-      }
+      if (!messageId || !userId) return res.status(400).json({ error: "Missing fields" });
       const existing = await query(
         `SELECT id, room_id AS "roomId", user_id AS "userId" FROM messages WHERE id = $1`,
         [messageId]
       );
-      if (existing.rows.length === 0) {
-        return res.status(404).json({ error: "Message not found" });
-      }
+      if (existing.rows.length === 0) return res.status(404).json({ error: "Message not found" });
       const msg = existing.rows[0];
-      if (msg.userId !== userId) {
-        return res.status(403).json({ error: "You can only delete your own messages" });
-      }
+      if (msg.userId !== userId) return res.status(403).json({ error: "Not your message" });
       await query("DELETE FROM messages WHERE id = $1", [messageId]);
       broadcastDelete(msg.roomId, messageId);
       return res.json({ success: true });
     } catch (err) {
       console.error("DELETE /api/messages/message error:", err);
-      return res.status(500).json({ error: "Failed to delete message" });
+      return res.status(500).json({ error: "Failed to delete" });
     }
   });
 
@@ -158,8 +149,73 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await query("DELETE FROM messages WHERE room_id = $1", [roomId]);
       return res.json({ success: true });
     } catch (err) {
-      console.error("DELETE /api/messages error:", err);
-      return res.status(500).json({ error: "Failed to clear messages" });
+      return res.status(500).json({ error: "Failed to clear" });
+    }
+  });
+
+  // ─── Admin ────────────────────────────────────────────────────────────────
+
+  app.get("/api/admin", async (_req: Request, res: Response) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      const result = await query(
+        `SELECT key, value FROM settings WHERE key IN ('admin_device_id', 'admin_name')`
+      );
+      const map: Record<string, string> = {};
+      result.rows.forEach((r: any) => { map[r.key] = r.value; });
+      return res.json({
+        adminDeviceId: map.admin_device_id || null,
+        adminName: map.admin_name || null,
+      });
+    } catch (err) {
+      console.error("GET /api/admin error:", err);
+      return res.status(500).json({ error: "Failed to fetch admin" });
+    }
+  });
+
+  app.post("/api/admin/claim", async (req: Request, res: Response) => {
+    try {
+      const { deviceId, name } = req.body;
+      if (!deviceId || !name) return res.status(400).json({ error: "deviceId and name required" });
+
+      // Check if admin already exists
+      const existing = await query(`SELECT value FROM settings WHERE key = 'admin_device_id'`);
+
+      if (existing.rows.length > 0) {
+        // Admin already claimed
+        const currentAdminId = existing.rows[0].value;
+        const isAdmin = currentAdminId === deviceId;
+        const nameRow = await query(`SELECT value FROM settings WHERE key = 'admin_name'`);
+        return res.json({
+          claimed: isAdmin,
+          isAdmin,
+          adminDeviceId: currentAdminId,
+          adminName: nameRow.rows[0]?.value || null,
+        });
+      }
+
+      // No admin yet — this device claims admin
+      const now = Date.now();
+      await query(
+        `INSERT INTO settings (key, value, updated_at) VALUES ('admin_device_id', $1, $2)`,
+        [deviceId, now]
+      );
+      await query(
+        `INSERT INTO settings (key, value, updated_at) VALUES ('admin_name', $1, $2)`,
+        [name, now]
+      );
+
+      broadcastGlobal("admin_set", { adminDeviceId: deviceId, adminName: name });
+
+      return res.status(201).json({
+        claimed: true,
+        isAdmin: true,
+        adminDeviceId: deviceId,
+        adminName: name,
+      });
+    } catch (err) {
+      console.error("POST /api/admin/claim error:", err);
+      return res.status(500).json({ error: "Failed to claim admin" });
     }
   });
 
@@ -167,7 +223,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/members", async (_req: Request, res: Response) => {
     try {
-      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("Cache-Control", "no-store");
       const result = await query(
         `SELECT id, name, phone, avatar, CAST(added_at AS TEXT) AS "addedAt"
          FROM members ORDER BY added_at ASC`
@@ -185,12 +241,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/members", async (req: Request, res: Response) => {
     try {
-      const { members } = req.body as { members: Array<{ id: string; name: string; phone?: string; avatar: string }> };
+      const { members, adminDeviceId, adminName } = req.body as {
+        members: Array<{ id: string; name: string; phone?: string; avatar: string }>;
+        adminDeviceId?: string;
+        adminName?: string;
+      };
+
+      // Verify admin
+      const adminRow = await query(`SELECT value FROM settings WHERE key = 'admin_device_id'`);
+      if (adminRow.rows.length > 0 && adminRow.rows[0].value !== adminDeviceId) {
+        return res.status(403).json({ error: "Only admin can add members" });
+      }
+
       if (!Array.isArray(members) || members.length === 0) {
         return res.status(400).json({ error: "Members array required" });
       }
+
       const addedAt = Date.now();
       const added: any[] = [];
+
       for (const m of members) {
         if (!m.id || !m.name) continue;
         try {
@@ -204,13 +273,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (result.rows.length > 0) {
             added.push({ ...result.rows[0], addedAt: parseInt(result.rows[0].addedAt, 10) });
           }
-        } catch {
-          // skip duplicates
-        }
+        } catch { /* skip dup */ }
       }
+
       if (added.length > 0) {
-        broadcastGlobal("members_updated", { action: "added", members: added });
+        const addedNames = added.map((m: any) => m.name);
+        const notifText = added.length === 1
+          ? `${adminName || 'Admin'} added ${addedNames[0]}`
+          : `${adminName || 'Admin'} added ${added.length} new members`;
+
+        broadcastGlobal("members_updated", {
+          action: "added",
+          members: added,
+          notification: notifText,
+        });
       }
+
       return res.status(201).json({ added });
     } catch (err) {
       console.error("POST /api/members error:", err);
@@ -221,6 +299,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.delete("/api/members/:memberId", async (req: Request, res: Response) => {
     try {
       const { memberId } = req.params;
+      const { adminDeviceId } = req.body;
+
+      // Verify admin
+      const adminRow = await query(`SELECT value FROM settings WHERE key = 'admin_device_id'`);
+      if (adminRow.rows.length > 0 && adminRow.rows[0].value !== adminDeviceId) {
+        return res.status(403).json({ error: "Only admin can remove members" });
+      }
+
       await query("DELETE FROM members WHERE id = $1", [memberId]);
       broadcastGlobal("members_updated", { action: "removed", memberId });
       return res.json({ success: true });
@@ -234,7 +320,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get("/api/projects", async (_req: Request, res: Response) => {
     try {
-      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("Cache-Control", "no-store");
       const result = await query(
         `SELECT id, title, description, creator, creator_id AS "creatorId",
                 tags, teammates, max_team AS "maxTeam",
@@ -281,21 +367,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { projectId } = req.params;
       const { userName } = req.body;
-      if (!userName) {
-        return res.status(400).json({ error: "userName required" });
-      }
+      if (!userName) return res.status(400).json({ error: "userName required" });
       const existing = await query("SELECT * FROM projects WHERE id = $1", [projectId]);
-      if (existing.rows.length === 0) {
-        return res.status(404).json({ error: "Project not found" });
-      }
+      if (existing.rows.length === 0) return res.status(404).json({ error: "Project not found" });
       const project = existing.rows[0];
       const teammates: string[] = project.teammates || [];
       if (teammates.includes(userName)) {
         return res.json({ project: { ...project, maxTeam: project.max_team, creatorId: project.creator_id } });
       }
-      if (teammates.length >= project.max_team) {
-        return res.status(400).json({ error: "Team is full" });
-      }
+      if (teammates.length >= project.max_team) return res.status(400).json({ error: "Team is full" });
       const newTeammates = [...teammates, userName];
       const result = await query(
         `UPDATE projects SET teammates = $1 WHERE id = $2
@@ -310,6 +390,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err) {
       console.error("POST /api/projects/:id/join error:", err);
       return res.status(500).json({ error: "Failed to join project" });
+    }
+  });
+
+  // ─── AI Chat ──────────────────────────────────────────────────────────────
+
+  app.post("/api/ai/chat", async (req: Request, res: Response) => {
+    try {
+      const { messages } = req.body as {
+        messages: Array<{ role: "user" | "model"; text: string }>;
+      };
+
+      if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ error: "Messages required" });
+      }
+
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(503).json({ error: "AI not configured" });
+      }
+
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.0-flash",
+        systemInstruction:
+          "You are GangAI, a sharp and helpful AI assistant embedded in Green Gang — a private mobile community app. " +
+          "You're knowledgeable, concise, and match the gang's vibe: real, direct, and friendly. " +
+          "Help members with questions, ideas, tech topics, creative projects, or anything they need. " +
+          "Keep responses focused and well-formatted. Use markdown sparingly — only when it truly helps readability.",
+      });
+
+      const history = messages.slice(0, -1).map(m => ({
+        role: m.role,
+        parts: [{ text: m.text }],
+      }));
+
+      const chat = model.startChat({ history });
+      const lastMessage = messages[messages.length - 1];
+      const result = await chat.sendMessage(lastMessage.text);
+      const responseText = result.response.text();
+
+      return res.json({ reply: responseText });
+    } catch (err: any) {
+      console.error("POST /api/ai/chat error:", err);
+      return res.status(500).json({ error: err?.message || "AI request failed" });
     }
   });
 
