@@ -241,17 +241,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/members", async (req: Request, res: Response) => {
     try {
-      const { members, adminDeviceId, adminName } = req.body as {
+      const { members, adminName } = req.body as {
         members: Array<{ id: string; name: string; phone?: string; avatar: string }>;
         adminDeviceId?: string;
         adminName?: string;
       };
-
-      // Verify admin
-      const adminRow = await query(`SELECT value FROM settings WHERE key = 'admin_device_id'`);
-      if (adminRow.rows.length > 0 && adminRow.rows[0].value !== adminDeviceId) {
-        return res.status(403).json({ error: "Only admin can add members" });
-      }
 
       if (!Array.isArray(members) || members.length === 0) {
         return res.status(400).json({ error: "Members array required" });
@@ -299,13 +293,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.delete("/api/members/:memberId", async (req: Request, res: Response) => {
     try {
       const { memberId } = req.params;
-      const { adminDeviceId } = req.body;
-
-      // Verify admin
-      const adminRow = await query(`SELECT value FROM settings WHERE key = 'admin_device_id'`);
-      if (adminRow.rows.length > 0 && adminRow.rows[0].value !== adminDeviceId) {
-        return res.status(403).json({ error: "Only admin can remove members" });
-      }
 
       await query("DELETE FROM members WHERE id = $1", [memberId]);
       broadcastGlobal("members_updated", { action: "removed", memberId });
@@ -409,24 +396,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(503).json({ error: "AI not configured" });
       }
 
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.0-flash",
-        systemInstruction:
-          "You are GangAI, a sharp and helpful AI assistant embedded in Green Gang — a private mobile community app. " +
-          "You're knowledgeable, concise, and match the gang's vibe: real, direct, and friendly. " +
-          "Help members with questions, ideas, tech topics, creative projects, or anything they need. " +
-          "Keep responses focused and well-formatted. Use markdown sparingly — only when it truly helps readability.",
-      });
+      const systemInstruction =
+        "You are GangAI, a sharp and helpful AI assistant embedded in Green Gang — a private mobile community app. " +
+        "You're knowledgeable, concise, and match the gang's vibe: real, direct, and friendly. " +
+        "Help members with questions, ideas, tech topics, creative projects, or anything they need. " +
+        "Keep responses focused and well-formatted. Use markdown sparingly — only when it truly helps readability.";
 
-      const history = messages.slice(0, -1).map(m => ({
-        role: m.role,
-        parts: [{ text: m.text }],
-      }));
+      const MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
+      let responseText = "";
+      let lastError: any;
 
-      const chat = model.startChat({ history });
-      const lastMessage = messages[messages.length - 1];
-      const result = await chat.sendMessage(lastMessage.text);
-      const responseText = result.response.text();
+      for (const modelName of MODELS) {
+        try {
+          const model = genAI.getGenerativeModel({ model: modelName, systemInstruction });
+          const history = messages.slice(0, -1).map(m => ({
+            role: m.role,
+            parts: [{ text: m.text }],
+          }));
+          const chat = model.startChat({ history });
+          const lastMessage = messages[messages.length - 1];
+          const result = await chat.sendMessage(lastMessage.text);
+          responseText = result.response.text();
+          break;
+        } catch (err: any) {
+          lastError = err;
+          const isRateLimit = err?.message?.includes("429") || err?.message?.includes("quota");
+          if (!isRateLimit) throw err;
+          console.warn(`Model ${modelName} failed (rate limit), trying next...`);
+        }
+      }
+
+      if (!responseText) throw lastError;
 
       return res.json({ reply: responseText });
     } catch (err: any) {

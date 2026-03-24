@@ -132,6 +132,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [members, setMembers] = useState<Member[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminName, setAdminName] = useState<string | null>(null);
+  const [adminDeviceId, setAdminDeviceId] = useState<string | null>(null);
   const [hasSeenWelcome, setHasSeenWelcomeState] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
@@ -176,20 +177,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!res.ok) return;
       const data = await res.json();
       if (isMounted.current) {
-        setIsAdmin(data.isAdmin === true);
+        const adminStatus = data.isAdmin === true;
+        setIsAdmin(adminStatus);
         setAdminName(data.adminName || null);
+        setAdminDeviceId(data.adminDeviceId || null);
+        // Persist admin status so it survives network failures
+        await AsyncStorage.setItem('gg_is_admin', adminStatus ? 'true' : 'false');
+        if (data.adminName) await AsyncStorage.setItem('gg_admin_name', data.adminName);
       }
-    } catch { /* silent */ }
+    } catch (err) {
+      console.error('claimOrCheckAdmin failed:', err);
+    }
   }, []);
 
   const loadData = async () => {
     try {
-      const [savedEvents, savedProfile, savedWelcome, savedDeviceId] = await Promise.all([
+      const [savedEvents, savedProfile, savedWelcome, savedDeviceId, savedIsAdmin, savedAdminName] = await Promise.all([
         AsyncStorage.getItem('gg_events'),
         AsyncStorage.getItem('gg_profile'),
         AsyncStorage.getItem('gg_welcome_seen'),
         AsyncStorage.getItem('gg_device_id'),
+        AsyncStorage.getItem('gg_is_admin'),
+        AsyncStorage.getItem('gg_admin_name'),
       ]);
+      // Restore admin state from cache immediately (before network call)
+      if (savedIsAdmin === 'true') setIsAdmin(true);
+      if (savedAdminName) setAdminName(savedAdminName);
 
       let deviceId = savedDeviceId;
       if (!deviceId) {

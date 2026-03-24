@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, Pressable, Platform, TextInput,
-  FlatList, KeyboardAvoidingView, ActivityIndicator, Alert, Image,
+  FlatList, KeyboardAvoidingView, ActivityIndicator, Alert, Image, Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -9,6 +9,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp } from '@/contexts/AppContext';
 import Colors from '@/constants/colors';
 import * as Haptics from 'expo-haptics';
+import * as WebBrowser from 'expo-web-browser';
 import Animated, {
   useSharedValue, useAnimatedStyle, withSpring, FadeIn,
 } from 'react-native-reanimated';
@@ -338,7 +339,36 @@ export default function RoomScreen() {
             </View>
           </View>
         </View>
-        <View style={{ width: 40 }} />
+        <Pressable
+          onPress={async () => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            const roomSlug = `GreenGang-${id?.replace(/[^a-zA-Z0-9]/g, '-') ?? 'general'}`;
+            const url = `https://meet.jit.si/${roomSlug}`;
+            Alert.alert(
+              'Start Video Call',
+              `Join a live video call for "${room?.name}"? All gang members with the link can join.`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Join Call',
+                  onPress: async () => {
+                    try {
+                      await WebBrowser.openBrowserAsync(url, {
+                        toolbarColor: Colors.dark.background,
+                        controlsColor: Colors.dark.green,
+                      });
+                    } catch {
+                      Linking.openURL(url);
+                    }
+                  },
+                },
+              ]
+            );
+          }}
+          style={({ pressed }) => [styles.videoBtn, pressed && { opacity: 0.7 }]}
+        >
+          <Ionicons name="videocam" size={20} color={Colors.dark.green} />
+        </Pressable>
       </View>
 
       {/* Messages */}
@@ -558,4 +588,10 @@ const styles = StyleSheet.create({
   errorText: { fontFamily: 'SpaceGrotesk_400Regular', fontSize: 16, color: Colors.dark.textMuted },
   backBtn: { backgroundColor: Colors.dark.surface, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.dark.border, marginTop: 8 },
   backBtnText: { fontFamily: 'SpaceGrotesk_500Medium', fontSize: 14, color: Colors.dark.text },
+  videoBtn: {
+    width: 40, height: 40, borderRadius: 12,
+    backgroundColor: Colors.dark.greenGlowSubtle,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: Colors.dark.greenGlow,
+  },
 });
